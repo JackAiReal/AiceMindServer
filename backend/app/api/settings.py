@@ -1,9 +1,232 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+from datetime import datetime
+from io import BytesIO
+
+from fastapi import APIRouter, File, UploadFile
+from fastapi.responses import StreamingResponse
 from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
+
+
+# ===== 配置导出/导入 =====
+
+_CONFIG_TABLES = {
+    'security_policy': {
+        'single': True,
+        'id_col': 'id',
+        'cols': [
+            'password_min_length', 'password_require_letter', 'password_require_digit',
+            'password_require_special', 'login_fail_max', 'login_fail_window_minutes',
+            'login_lock_minutes', 'session_ttl_hours', 'force_logout_on_password_reset',
+        ],
+    },
+    'email_settings': {
+        'single': True,
+        'id_col': 'id',
+        'cols': [
+            'smtp_host', 'smtp_port', 'smtp_username', 'smtp_password',
+            'from_email', 'from_name', 'use_tls', 'use_ssl',
+            'verify_subject_template', 'verify_body_template',
+        ],
+    },
+    'payment_settings': {
+        'single': True,
+        'id_col': 'id',
+        'cols': [
+            'alipay_enabled', 'alipay_app_id', 'alipay_merchant_id',
+            'alipay_app_private_key', 'alipay_public_key',
+            'alipay_gateway', 'alipay_notify_url', 'alipay_return_url', 'alipay_sign_type',
+            'wechat_enabled', 'wechat_app_id', 'wechat_merchant_id',
+            'wechat_api_v3_key', 'wechat_private_key', 'wechat_serial_no',
+            'wechat_gateway', 'wechat_notify_url', 'wechat_return_url',
+            'payment_alert_enabled', 'payment_alert_emails', 'payment_alert_webhook',
+        ],
+    },
+    'observability_settings': {
+        'single': True,
+        'id_col': 'id',
+        'cols': ['sentry_dsn', 'alert_webhook', 'alert_emails'],
+    },
+    'legal_docs': {
+        'single': False,
+        'id_col': 'doc_type',
+        'cols': ['doc_type', 'title', 'content', 'version', 'effective_at'],
+    },
+    'plans': {
+        'single': False,
+        'id_col': 'code',
+        'cols': [
+            'id', 'code', 'name', 'price', 'duration_days', 'level',
+            'status', 'description', 'daily_points_refresh', 'backtest_point_multiplier',
+        ],
+    },
+}
+
+
+def _export_table(conn: sqlite3.Connection, table_name: str, meta: dict) -> list[dict]:
+    cols = meta['cols']
+    col_str = ', '.join(cols)
+    rows = conn.execute(f'SELECT {col_str} FROM {table_name}').fetchall()
+    result = []
+    for row in rows:
+        item = {}
+        for col in cols:
+            val = row[col]
+            # 布尔值转换
+            if isinstance(val, int) and col in (
+                'password_require_letter', 'password_require_digit', 'password_require_special',
+                'force_logout_on_password_reset', 'use_tls', 'use_ssl',
+                'alipay_enabled', 'wechat_enabled', 'payment_alert_enabled',
+            ):
+                item[col] = bool(val)
+            else:
+                item[col] = val
+        result.append(item)
+    return result
+
+
+def _import_table(conn: sqlite3.Connection, table_name: str, meta: dict, rows: list[dict]):
+    cols = meta['cols']
+    placeholders = ', '.join(['?' for _ in cols])
+    col_str = ', '.join(cols)
+
+    if meta['single']:
+        # 单条记录表：先确保 id=1 存在
+        row = rows[0] if rows else {}
+        if not row:
+            return
+        exists = conn.execute(f'SELECT 1 FROM {table_name} LIMIT 1').fetchone()
+        if exists:
+            # UPDATE
+            set_clause = ', '.join([f'{c} = ?' for c in cols])
+            values = [row.get(c) for c in cols]
+            conn.execute(f'UPDATE {table_name} SET {set_clause}', values)
+        else:
+            # INSERT（需要 created_at/updated_at）
+            now = _now_str()
+            all_cols = cols + ['updated_at', 'created_at']
+            all_vals = [row.get(c) for c in cols] + [now, now]
+            all_placeholders = ', '.join(['?' for _ in all_cols])
+            conn.execute(
+                f'INSERT INTO {table_name} ({", ".join(all_cols)}) VALUES ({all_placeholders})',
+                all_vals,
+            )
+    else:
+        # 多条记录表：先清空再插入
+        conn.execute(f'DELETE FROM {table_name}')
+        now = _now_str()
+        extra_cols = []
+        if table_name == 'legal_docs':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'plans':
+            extra_cols = ['updated_at', 'created_at']
+
+        for row in rows:
+            values = [row.get(c) for c in cols]
+            if extra_cols:
+                all_cols = cols + extra_cols
+                all_vals = values + [now, now]
+            else:
+                all_cols = cols
+                all_vals = values
+            all_placeholders = ', '.join(['?' for _ in all_cols])
+            conn.execute(
+                f'INSERT INTO {table_name} ({", ".join(all_cols)}) VALUES ({all_placeholders})',
+                all_vals,
+            )
+
+
+@router.post('/system/config/export')
+def export_config(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_admin(user)
+
+    _ensure_db()
+    payload = {
+        'version': '1.0',
+        'exported_at': datetime.now().isoformat(),
+        'tables': {},
+    }
+
+    with _DB_LOCK:
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            for table_name, meta in _CONFIG_TABLES.items():
+                try:
+                    payload['tables'][table_name] = _export_table(conn, table_name, meta)
+                except Exception:
+                    payload['tables'][table_name] = []
+
+    filename = f"aicemind-config-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+
+    return StreamingResponse(
+        BytesIO(data),
+        media_type='application/json',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post('/system/config/import')
+def import_config(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _require_user(authorization)
+    _require_admin(user)
+
+    if not file.filename or not file.filename.endswith('.json'):
+        return _fail('请上传 .json 文件')
+
+    try:
+        content = file.file.read().decode('utf-8')
+        payload = json.loads(content)
+    except Exception as e:
+        return _fail(f'文件解析失败: {e}')
+
+    if not isinstance(payload, dict):
+        return _fail('文件格式错误')
+
+    version = str(payload.get('version') or '')
+    if version not in ('', '1.0'):
+        return _fail(f'不支持的配置版本: {version}')
+
+    tables = payload.get('tables')
+    if not isinstance(tables, dict):
+        return _fail('配置数据格式错误')
+
+    results = {}
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            for table_name, meta in _CONFIG_TABLES.items():
+                rows = tables.get(table_name)
+                if not isinstance(rows, list):
+                    results[table_name] = 'skipped'
+                    continue
+                try:
+                    _import_table(conn, table_name, meta, rows)
+                    results[table_name] = f'ok ({len(rows)} rows)'
+                except Exception as e:
+                    results[table_name] = f'error: {e}'
+            conn.commit()
+
+    _audit_log(
+        conn,
+        str(user.get('id') or ''),
+        'system.config.import',
+        'config',
+        'all',
+        {'results': results},
+    )
+
+    return _ok({'results': results}, message='配置导入完成')
+
+
+# ===== 原有接口 =====
 
 @router.get('/public/legal-docs')
 def public_legal_docs(docType: str = Query('', description='terms/privacy/risk_disclaimer')):

@@ -38,12 +38,31 @@ from app.core.entitlement import (
 
 
 _DB_LOCK = threading.Lock()
+# 运行期默认跳过重复初始化，避免与主后端共享 SQLite 时出现锁竞争
+_DB_READY = True
 _DB_PATH = resolve_sqlite_path(Path(__file__).resolve().parents[2] / 'data' / 'admin_console.db')
 _DB_RUNTIME = describe_runtime(_DB_PATH)
 
 
 def _db_connect():
     return connect_sqlite(_DB_PATH)
+
+
+def _execute_with_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple[Any, ...] = (),
+    retries: int = 6,
+    base_delay: float = 0.08,
+):
+    """SQLite 写操作重试，缓解多进程并发时的短暂锁冲突。"""
+    for i in range(max(1, int(retries))):
+        try:
+            return conn.execute(sql, params)
+        except sqlite3.OperationalError as e:
+            if 'locked' not in str(e).lower() or i >= retries - 1:
+                raise
+            time.sleep(base_delay * (i + 1))
 
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 _NO_EXPIRE_TIME = '2099-12-31 23:59:59'
@@ -614,7 +633,8 @@ def _get_login_lock_state(conn: sqlite3.Connection, login_key: str) -> dict[str,
     locked_until = str(row['locked_until'] or '')
     locked_seconds = _login_lock_seconds(locked_until)
     if locked_seconds <= 0 and locked_until:
-        conn.execute(
+        _execute_with_retry(
+            conn,
             'UPDATE login_attempts SET locked_until = ?, updated_at = ? WHERE login_key = ?',
             ('', _now_str(), login_key),
         )
@@ -647,7 +667,8 @@ def _record_login_failure(conn: sqlite3.Connection, login_key: str):
     if fail_count >= int(limits['loginFailMax']):
         locked_until = (now + timedelta(minutes=int(limits['loginLockMinutes']))).strftime('%Y-%m-%d %H:%M:%S')
 
-    conn.execute(
+    _execute_with_retry(
+        conn,
         '''
         INSERT INTO login_attempts (
             login_key, fail_count, first_fail_at, locked_until, updated_at, created_at
@@ -663,7 +684,7 @@ def _record_login_failure(conn: sqlite3.Connection, login_key: str):
 
 
 def _clear_login_failures(conn: sqlite3.Connection, login_key: str):
-    conn.execute('DELETE FROM login_attempts WHERE login_key = ?', (login_key,))
+    _execute_with_retry(conn, 'DELETE FROM login_attempts WHERE login_key = ?', (login_key,))
 
 
 def _token_digest(token: str) -> str:
@@ -677,7 +698,8 @@ def _create_admin_session(conn: sqlite3.Connection, account_id: str) -> str:
     limits = _runtime_security_limits(conn)
     ttl_hours = int(limits.get('sessionTtlHours') or _DEFAULT_SECURITY_POLICY['sessionTtlHours'])
     expire_at = (now + timedelta(hours=max(1, ttl_hours))).strftime('%Y-%m-%d %H:%M:%S')
-    conn.execute(
+    _execute_with_retry(
+        conn,
         '''
         INSERT INTO auth_sessions (
             id, account_id, token_digest, created_at, expire_at,
@@ -731,18 +753,30 @@ def _query_active_session(conn: sqlite3.Connection, token: str) -> Optional[sqli
 
     expire_dt = _parse_dt(expire_at)
     if not expire_dt or expire_dt <= datetime.now():
-        conn.execute(
-            "UPDATE auth_sessions SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at = ''",
+        try:
+            _execute_with_retry(
+                conn,
+                "UPDATE auth_sessions SET revoked_at = ?, updated_at = ? WHERE id = ? AND revoked_at = ''",
+                (now, now, row['id']),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            # 共享 SQLite 时可能被其他进程短暂占锁，过期会话标记失败不影响本次鉴权结论
+            if 'locked' not in str(e).lower():
+                raise
+        return None
+
+    # 心跳更新时间采用 best-effort，避免锁冲突导致整条业务请求失败
+    try:
+        _execute_with_retry(
+            conn,
+            'UPDATE auth_sessions SET last_active_at = ?, updated_at = ? WHERE id = ?',
             (now, now, row['id']),
         )
         conn.commit()
-        return None
-
-    conn.execute(
-        'UPDATE auth_sessions SET last_active_at = ?, updated_at = ? WHERE id = ?',
-        (now, now, row['id']),
-    )
-    conn.commit()
+    except sqlite3.OperationalError as e:
+        if 'locked' not in str(e).lower():
+            raise
     return row
 
 
@@ -801,6 +835,10 @@ def _require_entitled_user(authorization: Optional[str]) -> tuple[dict[str, Any]
 
 
 def _ensure_db():
+    global _DB_READY
+    if _DB_READY:
+        return
+
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _db_connect() as conn:
         conn.execute(
@@ -1980,6 +2018,8 @@ def _sync_member_for_account(
                 now,
             ),
         )
+
+    _DB_READY = True
 
 
 def _apply_plan_to_account(

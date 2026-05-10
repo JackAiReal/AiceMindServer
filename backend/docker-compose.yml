@@ -1,0 +1,31 @@
+# AiceMind Admin Backend — Docker Compose 生产部署配置
+# 用法：docker compose up -d
+
+services:
+  aicemind-admin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aicemind-admin
+    restart: unless-stopped
+    ports:
+      - "5011:5011"  # 局域网可访问
+    env_file:
+      - .env
+    volumes:
+      # SQLite 数据库持久化（关键！）
+      - ./data:/app/data
+      # 如需覆盖代码可再挂，但生产建议只挂数据
+      # - ./app:/app/app
+    networks:
+      - aicemind-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5011/admin-api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  aicemind-net:
+    driver: bridge

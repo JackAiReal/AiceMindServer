@@ -537,3 +537,21 @@ export const listErrorEventsApi = (params?: { limit?: number }) =>
 
 export const testObservabilityAlertApi = () =>
   requestClient.post('/system/monitor/error/test');
+
+// ===== 配置导出/导入 =====
+
+export const exportConfigApi = () =>
+  requestClient.download('/system/config/export', {
+    method: 'POST',
+    responseType: 'blob',
+  });
+
+export const importConfigApi = (file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return requestClient.post<{ data: { results: Record<string, string> } }>(
+    '/system/config/import',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  );
+};

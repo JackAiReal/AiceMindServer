@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from fastapi.responses import PlainTextResponse
+
 from app.api.deps import *  # noqa: F401,F403
+from app.api.member import _handle_payment_callback
 
 router = APIRouter()
 
@@ -900,21 +903,59 @@ def repair_payment_by_out_trade_no(body: PaymentRepairBody, authorization: Optio
         }
     )
 
+async def _safe_payment_callback(provider: str, request: Request):
+    provider_key = str(provider or '').strip().lower()
+    try:
+        result = await _handle_payment_callback(provider_key, request)
+    except Exception as e:
+        logger.exception('payment callback error: provider=%s', provider_key)
+        try:
+            with _DB_LOCK:
+                _ensure_db()
+                with _db_connect() as conn:
+                    _notify_payment_alert(
+                        conn,
+                        category='payment_callback_failed',
+                        title='[支付回调告警] 回调处理异常',
+                        content=f'provider={provider_key} error={e}',
+                        payload={'provider': provider_key, 'error': str(e)},
+                        level='error',
+                    )
+                    conn.commit()
+        except Exception:
+            logger.exception('payment callback alert log failed: provider=%s', provider_key)
+
+        # 支付宝要求回调应答为 success；异常时也给 200 防止网关无限重试
+        if provider_key == 'alipay':
+            return PlainTextResponse('success', status_code=200)
+
+        return _ok({'accepted': True, 'provider': provider_key, 'error': str(e)}, message='callback accepted with error')
+
+    # 支付宝要求 success 纯文本应答，避免网关重试风暴
+    if provider_key == 'alipay':
+        return PlainTextResponse('success', status_code=200)
+
+    return result
+
+
 @router.post('/payment/callback/alipay')
 async def payment_callback_alipay(request: Request):
-    return await _handle_payment_callback('alipay', request)
+    return await _safe_payment_callback('alipay', request)
+
 
 @router.get('/payment/callback/alipay')
 async def payment_callback_alipay_get(request: Request):
-    return await _handle_payment_callback('alipay', request)
+    return await _safe_payment_callback('alipay', request)
+
 
 @router.post('/payment/callback/wechat')
 async def payment_callback_wechat(request: Request):
-    return await _handle_payment_callback('wechat', request)
+    return await _safe_payment_callback('wechat', request)
+
 
 @router.get('/payment/callback/wechat')
 async def payment_callback_wechat_get(request: Request):
-    return await _handle_payment_callback('wechat', request)
+    return await _safe_payment_callback('wechat', request)
 
 @router.get('/commerce/payment/status')
 def commerce_payment_status(

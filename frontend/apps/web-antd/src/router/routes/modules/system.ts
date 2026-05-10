@@ -129,6 +129,15 @@ const routes: RouteRecordRaw[] = [
           title: '观测与告警',
         },
       },
+      {
+        name: 'SystemTools',
+        path: '/system/tools',
+        component: () => import('#/views/system/system-tools/index.vue'),
+        meta: {
+          icon: 'mdi:wrench-cog-outline',
+          title: '系统工具',
+        },
+      },
     ],
   },
 ];
