@@ -101,6 +101,7 @@ def list_billing_ledger(
 
     with _DB_LOCK:
         _ensure_db()
+        get_entitlement_policy('basic')  # 触发账单相关表的懒初始化
         with _db_connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(

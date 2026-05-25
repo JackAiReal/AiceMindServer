@@ -273,7 +273,12 @@ def admin_menu_all(authorization: Optional[str] = Header(default=None)):
     roles = set(user.get('roles') or [])
     if {'super', 'admin'} & roles:
         menus.append(_build_user_manage_menu())
-        menus.append(_build_system_menu())
+        system_menu = _build_system_menu()
+        system_groups = list(system_menu.get('children') or [])
+        if system_groups:
+            menus.extend(system_groups)
+        else:
+            menus.append(system_menu)
 
     return _ok(menus)
 

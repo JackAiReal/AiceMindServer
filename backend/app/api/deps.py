@@ -3384,94 +3384,174 @@ def _build_system_menu() -> dict[str, Any]:
         'redirect': '/system/email-settings',
         'children': [
             {
-                'name': 'SystemEmailSettings',
-                'path': '/system/email-settings',
-                'component': '/system/email-settings/index',
+                'name': 'SystemBaseConfigGroup',
+                'path': '/system/base-config',
+                'redirect': '/system/email-settings',
                 'meta': {
-                    'icon': 'mdi:email-cog-outline',
-                    'title': '邮箱设置',
+                    'icon': 'mdi:cog-outline',
+                    'title': '基础配置',
                 },
+                'children': [
+                    {
+                        'name': 'SystemEmailSettings',
+                        'path': '/system/email-settings',
+                        'component': '/system/email-settings/index',
+                        'meta': {
+                            'icon': 'mdi:email-cog-outline',
+                            'title': '邮箱设置',
+                        },
+                    },
+                    {
+                        'name': 'SystemTools',
+                        'path': '/system/tools',
+                        'component': '/system/system-tools/index',
+                        'meta': {
+                            'icon': 'mdi:wrench-cog-outline',
+                            'title': '系统工具',
+                        },
+                    },
+                ],
             },
             {
-                'name': 'SystemPaymentSettings',
-                'path': '/system/payment-settings',
-                'component': '/system/payment-settings/index',
+                'name': 'SystemCommerceGroup',
+                'path': '/system/commerce',
+                'redirect': '/system/plans',
                 'meta': {
-                    'icon': 'mdi:credit-card-settings-outline',
-                    'title': '支付设置',
+                    'icon': 'mdi:store-outline',
+                    'title': '商业化管理',
                 },
+                'children': [
+                    {
+                        'name': 'SystemPaymentSettings',
+                        'path': '/system/payment-settings',
+                        'component': '/system/payment-settings/index',
+                        'meta': {
+                            'icon': 'mdi:credit-card-settings-outline',
+                            'title': '支付设置',
+                        },
+                    },
+                    {
+                        'name': 'SystemPlans',
+                        'path': '/system/plans',
+                        'component': '/system/plans/index',
+                        'meta': {
+                            'icon': 'mdi:card-account-details-outline',
+                            'title': '套餐管理',
+                        },
+                    },
+                    {
+                        'name': 'SystemSubscriptions',
+                        'path': '/system/subscriptions',
+                        'component': '/system/subscriptions/index',
+                        'meta': {
+                            'icon': 'mdi:calendar-check-outline',
+                            'title': '订阅管理',
+                        },
+                    },
+                    {
+                        'name': 'SystemOrders',
+                        'path': '/system/orders',
+                        'component': '/system/orders/index',
+                        'meta': {
+                            'icon': 'mdi:cash-multiple',
+                            'title': '订单管理',
+                        },
+                    },
+                ],
             },
             {
-                'name': 'SystemSecurityCenter',
-                'path': '/system/security-center',
-                'component': '/system/security-center/index',
+                'name': 'SystemSecurityComplianceGroup',
+                'path': '/system/security-compliance',
+                'redirect': '/system/security-center',
                 'meta': {
-                    'icon': 'mdi:shield-account-outline',
-                    'title': '安全中心',
+                    'icon': 'mdi:shield-check-outline',
+                    'title': '安全与合规',
                 },
+                'children': [
+                    {
+                        'name': 'SystemSecurityCenter',
+                        'path': '/system/security-center',
+                        'component': '/system/security-center/index',
+                        'meta': {
+                            'icon': 'mdi:shield-account-outline',
+                            'title': '安全中心',
+                        },
+                    },
+                    {
+                        'name': 'SystemAuditLogs',
+                        'path': '/system/audit-logs',
+                        'component': '/system/audit-logs/index',
+                        'meta': {
+                            'icon': 'mdi:file-document-edit-outline',
+                            'title': '审计日志',
+                        },
+                    },
+                    {
+                        'name': 'SystemLegalCompliance',
+                        'path': '/system/legal-compliance',
+                        'component': '/system/legal-compliance/index',
+                        'meta': {
+                            'icon': 'mdi:file-certificate-outline',
+                            'title': '合规文档',
+                        },
+                    },
+                    {
+                        'name': 'SystemAccountDeletion',
+                        'path': '/system/account-deletion',
+                        'component': '/system/account-deletion/index',
+                        'meta': {
+                            'icon': 'mdi:account-remove-outline',
+                            'title': '账号注销审批',
+                        },
+                    },
+                ],
             },
             {
-                'name': 'SystemAuditLogs',
-                'path': '/system/audit-logs',
-                'component': '/system/audit-logs/index',
-                'meta': {
-                    'icon': 'mdi:file-document-edit-outline',
-                    'title': '审计日志',
-                },
-            },
-            {
-                'name': 'SystemPlans',
-                'path': '/system/plans',
-                'component': '/system/plans/index',
-                'meta': {
-                    'icon': 'mdi:card-account-details-outline',
-                    'title': '套餐管理',
-                },
-            },
-            {
-                'name': 'SystemSubscriptions',
-                'path': '/system/subscriptions',
-                'component': '/system/subscriptions/index',
-                'meta': {
-                    'icon': 'mdi:calendar-check-outline',
-                    'title': '订阅管理',
-                },
-            },
-            {
-                'name': 'SystemOrders',
-                'path': '/system/orders',
-                'component': '/system/orders/index',
-                'meta': {
-                    'icon': 'mdi:cash-multiple',
-                    'title': '订单管理',
-                },
-            },
-            {
-                'name': 'SystemMonitorUserActions',
-                'path': '/system/monitor-user-actions',
-                'component': '/system/monitor-user-actions/index',
-                'meta': {
-                    'icon': 'mdi:history',
-                    'title': '用户操作记录',
-                },
-            },
-            {
-                'name': 'SystemMonitorBacktestRecords',
-                'path': '/system/monitor-backtest-records',
-                'component': '/system/monitor-backtest-records/index',
+                'name': 'SystemOpsMonitorGroup',
+                'path': '/system/ops-monitor',
+                'redirect': '/system/monitor-user-actions',
                 'meta': {
                     'icon': 'mdi:chart-line',
-                    'title': '回测全局记录',
+                    'title': '运营与监控',
                 },
-            },
-            {
-                'name': 'SystemMonitorPoints',
-                'path': '/system/monitor-points',
-                'component': '/system/monitor-points/index',
-                'meta': {
-                    'icon': 'mdi:star-circle-outline',
-                    'title': '积分流水监控',
-                },
+                'children': [
+                    {
+                        'name': 'SystemMonitorUserActions',
+                        'path': '/system/monitor-user-actions',
+                        'component': '/system/monitor-user-actions/index',
+                        'meta': {
+                            'icon': 'mdi:history',
+                            'title': '用户操作记录',
+                        },
+                    },
+                    {
+                        'name': 'SystemMonitorBacktestRecords',
+                        'path': '/system/monitor-backtest-records',
+                        'component': '/system/monitor-backtest-records/index',
+                        'meta': {
+                            'icon': 'mdi:chart-line',
+                            'title': '回测全局记录',
+                        },
+                    },
+                    {
+                        'name': 'SystemMonitorPoints',
+                        'path': '/system/monitor-points',
+                        'component': '/system/monitor-points/index',
+                        'meta': {
+                            'icon': 'mdi:star-circle-outline',
+                            'title': '积分流水监控',
+                        },
+                    },
+                    {
+                        'name': 'SystemObservability',
+                        'path': '/system/observability',
+                        'component': '/system/observability/index',
+                        'meta': {
+                            'icon': 'mdi:chart-timeline-variant',
+                            'title': '观测与告警',
+                        },
+                    },
+                ],
             },
         ],
     }

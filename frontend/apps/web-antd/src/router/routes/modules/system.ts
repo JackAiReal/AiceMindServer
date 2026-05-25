@@ -2,13 +2,13 @@ import type { RouteRecordRaw } from 'vue-router';
 
 const routes: RouteRecordRaw[] = [
   {
-    name: 'SystemSettings',
-    path: '/system',
+    name: 'SystemBaseConfig',
+    path: '/system-base',
     meta: {
-      icon: 'carbon:settings',
+      icon: 'mdi:cog-outline',
       keepAlive: true,
       order: 200,
-      title: '系统设置',
+      title: '基础配置',
     },
     redirect: '/system/email-settings',
     children: [
@@ -22,30 +22,34 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        name: 'SystemTools',
+        path: '/system/tools',
+        component: () => import('#/views/system/system-tools/index.vue'),
+        meta: {
+          icon: 'mdi:wrench-cog-outline',
+          title: '系统工具',
+        },
+      },
+    ],
+  },
+  {
+    name: 'SystemCommerceManage',
+    path: '/system-commerce',
+    meta: {
+      icon: 'mdi:store-outline',
+      keepAlive: true,
+      order: 210,
+      title: '商业化管理',
+    },
+    redirect: '/system/plans',
+    children: [
+      {
         name: 'SystemPaymentSettings',
         path: '/system/payment-settings',
         component: () => import('#/views/system/payment-settings/index.vue'),
         meta: {
           icon: 'mdi:credit-card-settings-outline',
           title: '支付设置',
-        },
-      },
-      {
-        name: 'SystemSecurityCenter',
-        path: '/system/security-center',
-        component: () => import('#/views/system/security-center/index.vue'),
-        meta: {
-          icon: 'mdi:shield-account-outline',
-          title: '安全中心',
-        },
-      },
-      {
-        name: 'SystemAuditLogs',
-        path: '/system/audit-logs',
-        component: () => import('#/views/system/audit-logs/index.vue'),
-        meta: {
-          icon: 'mdi:file-document-edit-outline',
-          title: '审计日志',
         },
       },
       {
@@ -75,6 +79,68 @@ const routes: RouteRecordRaw[] = [
           title: '订单管理',
         },
       },
+    ],
+  },
+  {
+    name: 'SystemSecurityCompliance',
+    path: '/system-security-compliance',
+    meta: {
+      icon: 'mdi:shield-check-outline',
+      keepAlive: true,
+      order: 220,
+      title: '安全与合规',
+    },
+    redirect: '/system/security-center',
+    children: [
+      {
+        name: 'SystemSecurityCenter',
+        path: '/system/security-center',
+        component: () => import('#/views/system/security-center/index.vue'),
+        meta: {
+          icon: 'mdi:shield-account-outline',
+          title: '安全中心',
+        },
+      },
+      {
+        name: 'SystemAuditLogs',
+        path: '/system/audit-logs',
+        component: () => import('#/views/system/audit-logs/index.vue'),
+        meta: {
+          icon: 'mdi:file-document-edit-outline',
+          title: '审计日志',
+        },
+      },
+      {
+        name: 'SystemLegalCompliance',
+        path: '/system/legal-compliance',
+        component: () => import('#/views/system/legal-compliance/index.vue'),
+        meta: {
+          icon: 'mdi:file-certificate-outline',
+          title: '合规文档',
+        },
+      },
+      {
+        name: 'SystemAccountDeletion',
+        path: '/system/account-deletion',
+        component: () => import('#/views/system/account-deletion/index.vue'),
+        meta: {
+          icon: 'mdi:account-remove-outline',
+          title: '账号注销审批',
+        },
+      },
+    ],
+  },
+  {
+    name: 'SystemOpsMonitor',
+    path: '/system-ops-monitor',
+    meta: {
+      icon: 'mdi:chart-line',
+      keepAlive: true,
+      order: 230,
+      title: '运营与监控',
+    },
+    redirect: '/system/monitor-user-actions',
+    children: [
       {
         name: 'SystemMonitorUserActions',
         path: '/system/monitor-user-actions',
@@ -103,39 +169,12 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
-        name: 'SystemLegalCompliance',
-        path: '/system/legal-compliance',
-        component: () => import('#/views/system/legal-compliance/index.vue'),
-        meta: {
-          icon: 'mdi:file-certificate-outline',
-          title: '合规文档',
-        },
-      },
-      {
-        name: 'SystemAccountDeletion',
-        path: '/system/account-deletion',
-        component: () => import('#/views/system/account-deletion/index.vue'),
-        meta: {
-          icon: 'mdi:account-remove-outline',
-          title: '账号注销审批',
-        },
-      },
-      {
         name: 'SystemObservability',
         path: '/system/observability',
         component: () => import('#/views/system/observability/index.vue'),
         meta: {
           icon: 'mdi:chart-timeline-variant',
           title: '观测与告警',
-        },
-      },
-      {
-        name: 'SystemTools',
-        path: '/system/tools',
-        component: () => import('#/views/system/system-tools/index.vue'),
-        meta: {
-          icon: 'mdi:wrench-cog-outline',
-          title: '系统工具',
         },
       },
     ],
