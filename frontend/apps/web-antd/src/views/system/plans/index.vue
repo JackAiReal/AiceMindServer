@@ -21,6 +21,7 @@ import {
   Modal as AModal,
   Select as ASelect,
   Space as ASpace,
+  Switch as ASwitch,
   Table as ATable,
   Tag as ATag,
 } from 'ant-design-vue';
@@ -37,8 +38,15 @@ interface PlanFormState {
   level: PlanLevel;
   status: PlanStatus;
   description: string;
+  // 商业化规则
+  chatMonthlyLimit: number;
+  chatDailyLimit: number;
+  backtestEnabled: boolean;
   dailyPointsRefresh: number;
   backtestPointMultiplier: number;
+  maxBacktestStocks: number;
+  maxBacktestDays: number;
+  reportDownloadEnabled: boolean;
 }
 
 const loading = ref(false);
@@ -55,8 +63,14 @@ const formState = reactive<PlanFormState>({
   level: 'basic',
   status: 'active',
   description: '',
+  chatMonthlyLimit: 2000,
+  chatDailyLimit: 100,
+  backtestEnabled: true,
   dailyPointsRefresh: 50,
   backtestPointMultiplier: 1,
+  maxBacktestStocks: 50,
+  maxBacktestDays: 365,
+  reportDownloadEnabled: true,
 });
 
 const isEdit = computed(() => !!formState.id);
@@ -91,8 +105,14 @@ const resetForm = () => {
   formState.level = 'basic';
   formState.status = 'active';
   formState.description = '';
+  formState.chatMonthlyLimit = 2000;
+  formState.chatDailyLimit = 100;
+  formState.backtestEnabled = true;
   formState.dailyPointsRefresh = 50;
   formState.backtestPointMultiplier = 1;
+  formState.maxBacktestStocks = 50;
+  formState.maxBacktestDays = 365;
+  formState.reportDownloadEnabled = true;
 };
 
 const onCreate = () => {
@@ -109,8 +129,14 @@ const onEdit = (row: PlanItem) => {
   formState.level = (row.level as PlanLevel) || 'basic';
   formState.status = (row.status as PlanStatus) || 'active';
   formState.description = row.description || '';
+  formState.chatMonthlyLimit = Number(row.chatMonthlyLimit ?? -1);
+  formState.chatDailyLimit = Number(row.chatDailyLimit ?? -1);
+  formState.backtestEnabled = row.backtestEnabled !== false;
   formState.dailyPointsRefresh = Number(row.dailyPointsRefresh || 0);
   formState.backtestPointMultiplier = Math.max(1, Number(row.backtestPointMultiplier || 1));
+  formState.maxBacktestStocks = Number(row.maxBacktestStocks ?? -1);
+  formState.maxBacktestDays = Number(row.maxBacktestDays ?? -1);
+  formState.reportDownloadEnabled = row.reportDownloadEnabled !== false;
   formOpen.value = true;
 };
 
@@ -129,12 +155,28 @@ const onSubmit = async () => {
     message.error('套餐价格不能为负数');
     return;
   }
+  if (formState.chatMonthlyLimit < -1) {
+    message.error('智能对话每月次数不能小于 -1（-1 表示不限）');
+    return;
+  }
+  if (formState.chatDailyLimit < -1) {
+    message.error('智能对话每日次数不能小于 -1（-1 表示不限）');
+    return;
+  }
   if (formState.dailyPointsRefresh < 0) {
     message.error('每日刷新积分不能为负数');
     return;
   }
   if (formState.backtestPointMultiplier <= 0) {
     message.error('回测积分倍率必须大于 0');
+    return;
+  }
+  if (formState.maxBacktestStocks < -1) {
+    message.error('单次回测股票上限不能小于 -1（-1 表示不限）');
+    return;
+  }
+  if (formState.maxBacktestDays < -1) {
+    message.error('回测时间跨度上限不能小于 -1（-1 表示不限）');
     return;
   }
 
@@ -149,8 +191,14 @@ const onSubmit = async () => {
       level: formState.level,
       status: formState.status,
       description: formState.description.trim(),
+      chatMonthlyLimit: Number(formState.chatMonthlyLimit ?? -1),
+      chatDailyLimit: Number(formState.chatDailyLimit ?? -1),
+      backtestEnabled: !!formState.backtestEnabled,
       dailyPointsRefresh: Number(formState.dailyPointsRefresh || 0),
       backtestPointMultiplier: Math.max(1, Number(formState.backtestPointMultiplier || 1)),
+      maxBacktestStocks: Number(formState.maxBacktestStocks ?? -1),
+      maxBacktestDays: Number(formState.maxBacktestDays ?? -1),
+      reportDownloadEnabled: !!formState.reportDownloadEnabled,
     };
 
     if (isEdit.value) {
@@ -198,7 +246,7 @@ onMounted(() => {
         </ASpace>
       </template>
 
-      <ATable :data-source="plans" :loading="loading" row-key="id" :pagination="{ pageSize: 10 }">
+      <ATable :data-source="plans" :loading="loading" row-key="id" :scroll="{ x: 1600 }" :pagination="{ pageSize: 10 }">
         <ATable.Column title="套餐编码" data-index="code" key="code" width="180" />
         <ATable.Column title="套餐名称" data-index="name" key="name" width="180" />
         <ATable.Column title="价格" key="price" width="120">
@@ -206,11 +254,30 @@ onMounted(() => {
         </ATable.Column>
         <ATable.Column title="时长(天)" data-index="durationDays" key="durationDays" width="110" />
         <ATable.Column title="等级" data-index="level" key="level" width="100" />
+        <ATable.Column title="智能对话(次/月·日)" key="chatLimit" width="180">
+          <template #default="{ record }">
+            {{ Number(record.chatMonthlyLimit ?? -1) < 0 ? '不限' : Number(record.chatMonthlyLimit ?? 0) }} /
+            {{ Number(record.chatDailyLimit ?? -1) < 0 ? '不限' : Number(record.chatDailyLimit ?? 0) }}
+          </template>
+        </ATable.Column>
         <ATable.Column title="每日刷新积分" key="dailyPointsRefresh" width="130">
           <template #default="{ record }">{{ Number(record.dailyPointsRefresh || 0) }}</template>
         </ATable.Column>
         <ATable.Column title="回测积分倍率" key="backtestPointMultiplier" width="130">
           <template #default="{ record }">x{{ Math.max(1, Number(record.backtestPointMultiplier || 1)) }}</template>
+        </ATable.Column>
+        <ATable.Column title="回测限制" key="backtestLimit" width="180">
+          <template #default="{ record }">
+            {{ Number(record.maxBacktestStocks ?? -1) < 0 ? '不限' : `${record.maxBacktestStocks}只` }} /
+            {{ Number(record.maxBacktestDays ?? -1) < 0 ? '不限' : `${record.maxBacktestDays}天` }}
+          </template>
+        </ATable.Column>
+        <ATable.Column title="报告下载" key="reportDownloadEnabled" width="100">
+          <template #default="{ record }">
+            <ATag :color="record.reportDownloadEnabled === false ? 'default' : 'green'">
+              {{ record.reportDownloadEnabled === false ? '关闭' : '开启' }}
+            </ATag>
+          </template>
         </ATable.Column>
         <ATable.Column title="状态" key="status" width="100">
           <template #default="{ record }">
@@ -260,11 +327,29 @@ onMounted(() => {
         <AFormItem label="状态" required>
           <ASelect v-model:value="formState.status" :options="statusOptions" />
         </AFormItem>
+        <AFormItem label="智能对话每月上限（-1 不限）" required>
+          <AInputNumber v-model:value="formState.chatMonthlyLimit" :min="-1" :precision="0" style="width: 100%" />
+        </AFormItem>
+        <AFormItem label="智能对话每日上限（-1 不限）" required>
+          <AInputNumber v-model:value="formState.chatDailyLimit" :min="-1" :precision="0" style="width: 100%" />
+        </AFormItem>
+        <AFormItem label="策略回测开关" required>
+          <ASwitch v-model:checked="formState.backtestEnabled" checked-children="开启" un-checked-children="关闭" />
+        </AFormItem>
         <AFormItem label="每日刷新积分" required>
           <AInputNumber v-model:value="formState.dailyPointsRefresh" :min="0" :precision="0" style="width: 100%" />
         </AFormItem>
         <AFormItem label="回测积分倍率" required>
           <AInputNumber v-model:value="formState.backtestPointMultiplier" :min="1" :precision="0" style="width: 100%" />
+        </AFormItem>
+        <AFormItem label="单次回测股票上限（-1 不限）" required>
+          <AInputNumber v-model:value="formState.maxBacktestStocks" :min="-1" :precision="0" style="width: 100%" />
+        </AFormItem>
+        <AFormItem label="回测时间跨度上限（天，-1 不限）" required>
+          <AInputNumber v-model:value="formState.maxBacktestDays" :min="-1" :precision="0" style="width: 100%" />
+        </AFormItem>
+        <AFormItem label="报告下载开关" required>
+          <ASwitch v-model:checked="formState.reportDownloadEnabled" checked-children="开启" un-checked-children="关闭" />
         </AFormItem>
         <AFormItem label="描述">
           <AInput.TextArea v-model:value="formState.description" :rows="3" placeholder="套餐说明（选填）" />

@@ -252,6 +252,20 @@ def admin_user_info(authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
     entitlement = user.get('entitlement') or _load_user_entitlement(user)
 
+    # 从 member_users 读取积分（与后台保持一致）
+    points = 0
+    try:
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT points FROM member_users WHERE user_id = ? LIMIT 1',
+                (str(user.get('username') or ''),),
+            ).fetchone()
+            if row:
+                points = int(row['points'] or 0)
+    except Exception:
+        points = 0
+
     return _ok(
         {
             'userId': user['id'],
@@ -262,8 +276,37 @@ def admin_user_info(authorization: Optional[str] = Header(default=None)):
             'homePath': user['homePath'],
             'avatar': f"https://avatar.vercel.sh/{user['username']}",
             'entitlement': entitlement,
+            'points': points,
         }
     )
+
+@router.get('/account/entitlement/summary')
+def account_entitlement_summary(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    account_id = str(user.get('id') or '').strip()
+
+    summary = get_billing_context(account_id)
+
+    points = 0
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT points FROM member_users WHERE user_id = ? LIMIT 1',
+                (str(user.get('username') or ''),),
+            ).fetchone()
+            if row:
+                points = int(row['points'] or 0)
+
+    summary['pointsBalance'] = points
+    summary['explain'] = {
+        'backtest': '策略回测按积分扣减；本次扣减 = 基础消耗 × 回测积分倍率。',
+        'chat': '智能对话按“每日上限 + 每月上限”双重控制（-1 表示不限）。',
+        'dailyRefresh': '每日积分刷新在每日首个鉴权/计费请求时自动执行。',
+    }
+    return _ok(summary)
+
 
 @router.get('/menu/all')
 def admin_menu_all(authorization: Optional[str] = Header(default=None)):

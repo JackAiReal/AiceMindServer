@@ -366,29 +366,50 @@ def get_entitlement_policy(level: str | None) -> dict[str, Any]:
     return base
 
 
-def upsert_entitlement_policy(level: str, policy: dict[str, Any]) -> dict[str, Any]:
-    _ensure_billing_tables()
+def upsert_entitlement_policy_in_conn(
+    conn: sqlite3.Connection,
+    level: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    """在现有连接里写入策略，避免外层事务中再开新连接导致 SQLite 锁冲突。"""
     normalized = _normalize_level(level)
 
-    current = get_entitlement_policy(normalized)
-    current.update(policy or {})
-    current['level'] = normalized
+    base = dict(_DEFAULT_POLICY_MAP.get(normalized) or _DEFAULT_POLICY_MAP['basic'])
+    row = conn.execute(
+        'SELECT policy_json FROM entitlement_policies WHERE level = ? LIMIT 1',
+        (normalized,),
+    ).fetchone()
+    if row:
+        try:
+            loaded = json.loads(row[0] or '{}')
+            if isinstance(loaded, dict):
+                base.update(loaded)
+        except Exception:
+            pass
+
+    base.update(policy or {})
+    base['level'] = normalized
 
     now = _now_str()
-    with _db_connect() as conn:
-        conn.execute(
-            '''
-            INSERT INTO entitlement_policies(level, policy_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(level) DO UPDATE SET
-                policy_json = excluded.policy_json,
-                updated_at = excluded.updated_at
-            ''',
-            (normalized, json.dumps(current, ensure_ascii=False), now, now),
-        )
-        conn.commit()
+    conn.execute(
+        '''
+        INSERT INTO entitlement_policies(level, policy_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(level) DO UPDATE SET
+            policy_json = excluded.policy_json,
+            updated_at = excluded.updated_at
+        ''',
+        (normalized, json.dumps(base, ensure_ascii=False), now, now),
+    )
+    return base
 
-    return current
+
+def upsert_entitlement_policy(level: str, policy: dict[str, Any]) -> dict[str, Any]:
+    _ensure_billing_tables()
+    with _db_connect() as conn:
+        merged = upsert_entitlement_policy_in_conn(conn, level, policy)
+        conn.commit()
+    return merged
 
 
 def _period_key_for_feature(feature_code: str, now: Optional[datetime] = None, scope: str = 'month') -> str:
@@ -652,6 +673,11 @@ def check_feature_access(account_id: str, feature_code: str, consume_amount: int
             month_limit = int(policy.get(month_limit_key, -1))
         except Exception:
             month_limit = -1
+
+    # 回测次数只走积分扣减，不走日/月次数配额
+    if feature == 'backtest.run':
+        day_limit = -1
+        month_limit = -1
 
     if day_limit >= 0:
         day_remaining_before = max(0, day_limit - day_used)

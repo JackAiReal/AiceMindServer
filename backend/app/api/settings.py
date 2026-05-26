@@ -1,14 +1,380 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from io import BytesIO
+
+from app.core.migrations import migrate_down, migrate_up, migration_status
 
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import StreamingResponse
 from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
+
+
+# ===== 客户端版本管控 =====
+
+class VersionPolicySaveBody(BaseModel):
+    appCode: str = 'AiceMind'
+    target: str = 'backtest-desktop'
+    platform: str = 'all'
+    channel: str = 'stable'
+    latestVersion: str = ''
+    minSupportedVersion: str = ''
+    enforceExactMatch: bool = True
+    forceUpgrade: bool = True
+    autoUpgradeWithoutConfirm: bool = False
+    title: str = '发现新版本，请升级后继续使用'
+    details: str = ''
+    downloadUrl: str = ''
+    releaseNotes: str = ''
+    publishedAt: str = ''
+
+
+class VersionCheckBody(BaseModel):
+    appCode: str = 'AiceMind'
+    target: str = 'backtest-desktop'
+    platform: str = 'all'
+    channel: str = 'stable'
+    currentVersion: str = ''
+
+
+def _normalize_version(v: str) -> str:
+    return str(v or '').strip().lstrip('vV')
+
+
+def _version_parts(v: str) -> list[int]:
+    n = _normalize_version(v)
+    if not n:
+        return []
+    nums = re.findall(r'\d+', n)
+    return [int(x) for x in nums] if nums else []
+
+
+def _cmp_version(a: str, b: str) -> int:
+    pa = _version_parts(a)
+    pb = _version_parts(b)
+    m = max(len(pa), len(pb))
+    pa += [0] * (m - len(pa))
+    pb += [0] * (m - len(pb))
+    for i in range(m):
+        if pa[i] < pb[i]:
+            return -1
+        if pa[i] > pb[i]:
+            return 1
+    return 0
+
+
+def _serialize_version_policy(row: Any) -> dict[str, Any]:
+    return {
+        'id': str(row['id'] or ''),
+        'appCode': str(row['app_code'] or ''),
+        'target': str(row['target'] or ''),
+        'platform': str(row['platform'] or ''),
+        'channel': str(row['channel'] or ''),
+        'latestVersion': str(row['latest_version'] or ''),
+        'minSupportedVersion': str(row['min_supported_version'] or ''),
+        'enforceExactMatch': bool(int(row['enforce_exact_match'] or 0)),
+        'forceUpgrade': bool(int(row['force_upgrade'] or 0)),
+        'autoUpgradeWithoutConfirm': bool(int(row['auto_upgrade_without_confirm'] or 0)),
+        'title': str(row['title'] or ''),
+        'details': str(row['details'] or ''),
+        'downloadUrl': str(row['download_url'] or ''),
+        'releaseNotes': str(row['release_notes'] or ''),
+        'publishedAt': str(row['published_at'] or ''),
+        'updatedBy': str(row['updated_by'] or ''),
+        'updatedAt': str(row['updated_at'] or ''),
+        'createdAt': str(row['created_at'] or ''),
+    }
+
+
+def _find_best_version_policy(
+    conn: sqlite3.Connection,
+    app_code: str,
+    target: str,
+    platform: str,
+    channel: str,
+):
+    candidates = [
+        (app_code, target, platform, channel),
+        (app_code, target, 'all', channel),
+        (app_code, target, platform, 'stable'),
+        (app_code, target, 'all', 'stable'),
+    ]
+
+    for a, t, p, c in candidates:
+        row = conn.execute(
+            '''
+            SELECT *
+            FROM client_version_policies
+            WHERE app_code = ? AND target = ? AND platform = ? AND channel = ?
+            LIMIT 1
+            ''',
+            (a, t, p, c),
+        ).fetchone()
+        if row:
+            return row
+    return None
+
+
+@router.get('/system/version-policy/list')
+def list_version_policies(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.version_policy.read')
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                '''
+                SELECT *
+                FROM client_version_policies
+                ORDER BY app_code ASC, target ASC, platform ASC, channel ASC, updated_at DESC
+                '''
+            ).fetchall()
+
+    return _ok([_serialize_version_policy(r) for r in rows])
+
+
+@router.post('/system/version-policy/save')
+def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.version_policy.manage')
+
+    app_code = str(body.appCode or 'AiceMind').strip() or 'AiceMind'
+    target = str(body.target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform = str(body.platform or 'all').strip() or 'all'
+    channel = str(body.channel or 'stable').strip() or 'stable'
+
+    latest_version = _normalize_version(body.latestVersion)
+    min_supported = _normalize_version(body.minSupportedVersion)
+
+    if not latest_version:
+        return _fail('latestVersion 不能为空')
+
+    if min_supported and _cmp_version(min_supported, latest_version) > 0:
+        return _fail('minSupportedVersion 不能高于 latestVersion')
+
+    now = _now_str()
+    actor = str(user.get('username') or user.get('id') or '').strip()
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            exists = conn.execute(
+                '''
+                SELECT id FROM client_version_policies
+                WHERE app_code = ? AND target = ? AND platform = ? AND channel = ?
+                LIMIT 1
+                ''',
+                (app_code, target, platform, channel),
+            ).fetchone()
+
+            row_id = str(exists['id'] if exists else uuid.uuid4().hex)
+
+            if exists:
+                conn.execute(
+                    '''
+                    UPDATE client_version_policies
+                    SET latest_version = ?,
+                        min_supported_version = ?,
+                        enforce_exact_match = ?,
+                        force_upgrade = ?,
+                        auto_upgrade_without_confirm = ?,
+                        title = ?,
+                        details = ?,
+                        download_url = ?,
+                        release_notes = ?,
+                        published_at = ?,
+                        updated_by = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    ''',
+                    (
+                        latest_version,
+                        min_supported,
+                        1 if body.enforceExactMatch else 0,
+                        1 if body.forceUpgrade else 0,
+                        1 if body.autoUpgradeWithoutConfirm else 0,
+                        str(body.title or '').strip() or '发现新版本，请升级后继续使用',
+                        str(body.details or '').strip(),
+                        str(body.downloadUrl or '').strip(),
+                        str(body.releaseNotes or '').strip(),
+                        str(body.publishedAt or '').strip(),
+                        actor,
+                        now,
+                        row_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    '''
+                    INSERT INTO client_version_policies (
+                        id, app_code, target, platform, channel,
+                        latest_version, min_supported_version,
+                        enforce_exact_match, force_upgrade, auto_upgrade_without_confirm,
+                        title, details, download_url, release_notes,
+                        published_at, updated_by, updated_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        row_id,
+                        app_code,
+                        target,
+                        platform,
+                        channel,
+                        latest_version,
+                        min_supported,
+                        1 if body.enforceExactMatch else 0,
+                        1 if body.forceUpgrade else 0,
+                        1 if body.autoUpgradeWithoutConfirm else 0,
+                        str(body.title or '').strip() or '发现新版本，请升级后继续使用',
+                        str(body.details or '').strip(),
+                        str(body.downloadUrl or '').strip(),
+                        str(body.releaseNotes or '').strip(),
+                        str(body.publishedAt or '').strip(),
+                        actor,
+                        now,
+                        now,
+                    ),
+                )
+
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.version_policy.save',
+                'client_version_policies',
+                row_id,
+                {
+                    'appCode': app_code,
+                    'target': target,
+                    'platform': platform,
+                    'channel': channel,
+                    'latestVersion': latest_version,
+                    'minSupportedVersion': min_supported,
+                    'forceUpgrade': bool(body.forceUpgrade),
+                    'autoUpgradeWithoutConfirm': bool(body.autoUpgradeWithoutConfirm),
+                },
+            )
+            conn.commit()
+
+    return _ok(True, message='版本策略已保存')
+
+
+@router.post('/public/version/check')
+def public_version_check(body: VersionCheckBody):
+    app_code = str(body.appCode or 'AiceMind').strip() or 'AiceMind'
+    target = str(body.target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform = str(body.platform or 'all').strip() or 'all'
+    channel = str(body.channel or 'stable').strip() or 'stable'
+    current = _normalize_version(body.currentVersion)
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = _find_best_version_policy(conn, app_code, target, platform, channel)
+
+    if not row:
+        return _ok(
+            {
+                'appCode': app_code,
+                'target': target,
+                'platform': platform,
+                'channel': channel,
+                'currentVersion': current,
+                'allowRun': True,
+                'needUpgrade': False,
+                'forceUpgrade': False,
+                'autoUpgradeWithoutConfirm': False,
+                'reason': 'no_policy',
+            }
+        )
+
+    latest = _normalize_version(str(row['latest_version'] or ''))
+    minimum = _normalize_version(str(row['min_supported_version'] or ''))
+    enforce_exact = bool(int(row['enforce_exact_match'] or 0))
+    force_upgrade = bool(int(row['force_upgrade'] or 0))
+    auto_upgrade = bool(int(row['auto_upgrade_without_confirm'] or 0))
+
+    need_upgrade = False
+    allow_run = True
+    reason = 'ok'
+
+    if enforce_exact:
+        need_upgrade = (not current) or _cmp_version(current, latest) != 0
+        allow_run = not need_upgrade
+        if need_upgrade:
+            reason = 'exact_version_required'
+    else:
+        if latest and current and _cmp_version(current, latest) < 0:
+            need_upgrade = True
+            reason = 'new_version_available'
+        if minimum and (not current or _cmp_version(current, minimum) < 0):
+            need_upgrade = True
+            allow_run = not force_upgrade
+            reason = 'below_min_supported'
+
+    if enforce_exact and need_upgrade:
+        allow_run = not force_upgrade
+
+    return _ok(
+        {
+            'appCode': app_code,
+            'target': target,
+            'platform': platform,
+            'channel': channel,
+            'currentVersion': current,
+            'latestVersion': latest,
+            'minSupportedVersion': minimum,
+            'enforceExactMatch': enforce_exact,
+            'allowRun': allow_run,
+            'needUpgrade': need_upgrade,
+            'forceUpgrade': force_upgrade,
+            'autoUpgradeWithoutConfirm': auto_upgrade,
+            'title': str(row['title'] or ''),
+            'details': str(row['details'] or ''),
+            'downloadUrl': str(row['download_url'] or ''),
+            'releaseNotes': str(row['release_notes'] or ''),
+            'publishedAt': str(row['published_at'] or ''),
+            'reason': reason,
+        }
+    )
+
+
+class MigrationDownBody(BaseModel):
+    steps: int = 1
+
+
+@router.get('/system/migrations/status')
+def get_migrations_status(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    data = migration_status()
+    return _ok(data)
+
+
+@router.post('/system/migrations/up')
+def run_migrations_up(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    applied = migrate_up()
+    return _ok({'applied': applied}, message='迁移执行完成')
+
+
+@router.post('/system/migrations/down')
+def run_migrations_down(body: MigrationDownBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    steps = max(1, int(body.steps or 1))
+    rolled = migrate_down(steps)
+    return _ok({'rolledBack': rolled}, message='回滚执行完成')
 
 
 # ===== 配置导出/导入 =====
@@ -62,6 +428,37 @@ _CONFIG_TABLES = {
             'id', 'code', 'name', 'price', 'duration_days', 'level',
             'status', 'description', 'daily_points_refresh', 'backtest_point_multiplier',
         ],
+    },
+    'client_version_policies': {
+        'single': False,
+        'id_col': 'id',
+        'cols': [
+            'id', 'app_code', 'target', 'platform', 'channel',
+            'latest_version', 'min_supported_version',
+            'enforce_exact_match', 'force_upgrade', 'auto_upgrade_without_confirm',
+            'title', 'details', 'download_url', 'release_notes',
+            'published_at', 'updated_by',
+        ],
+    },
+    'rbac_permissions': {
+        'single': False,
+        'id_col': 'code',
+        'cols': ['code', 'name', 'resource', 'action', 'description', 'status'],
+    },
+    'rbac_roles': {
+        'single': False,
+        'id_col': 'code',
+        'cols': ['id', 'code', 'name', 'description', 'is_system', 'status'],
+    },
+    'rbac_role_permissions': {
+        'single': False,
+        'id_col': 'id',
+        'cols': ['id', 'role_code', 'permission_code'],
+    },
+    'rbac_account_roles': {
+        'single': False,
+        'id_col': 'id',
+        'cols': ['id', 'account_id', 'role_code'],
     },
 }
 
@@ -123,6 +520,14 @@ def _import_table(conn: sqlite3.Connection, table_name: str, meta: dict, rows: l
             extra_cols = ['updated_at', 'created_at']
         elif table_name == 'plans':
             extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'client_version_policies':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'rbac_permissions':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'rbac_roles':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name in ('rbac_role_permissions', 'rbac_account_roles'):
+            extra_cols = ['created_at']
 
         for row in rows:
             values = [row.get(c) for c in cols]
@@ -142,7 +547,7 @@ def _import_table(conn: sqlite3.Connection, table_name: str, meta: dict, rows: l
 @router.post('/system/config/export')
 def export_config(authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
-    _require_admin(user)
+    _require_permission(user, 'system.config.export')
 
     _ensure_db()
     payload = {
@@ -176,7 +581,7 @@ def import_config(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _require_user(authorization)
-    _require_admin(user)
+    _require_permission(user, 'system.config.import')
 
     if not file.filename or not file.filename.endswith('.json'):
         return _fail('请上传 .json 文件')
@@ -212,16 +617,22 @@ def import_config(
                     results[table_name] = f'ok ({len(rows)} rows)'
                 except Exception as e:
                     results[table_name] = f'error: {e}'
-            conn.commit()
 
-    _audit_log(
-        conn,
-        str(user.get('id') or ''),
-        'system.config.import',
-        'config',
-        'all',
-        {'results': results},
-    )
+            # 审计日志必须在连接生命周期内写入，避免“导入成功但接口报500”
+            try:
+                _audit_log(
+                    conn,
+                    str(user.get('id') or ''),
+                    'system.config.import',
+                    'config',
+                    'all',
+                    {'results': results},
+                )
+            except Exception:
+                # 导入主流程已完成，审计失败不应影响用户结果
+                pass
+
+            conn.commit()
 
     return _ok({'results': results}, message='配置导入完成')
 

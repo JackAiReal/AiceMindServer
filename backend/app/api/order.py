@@ -87,9 +87,41 @@ def commerce_create_pay_order(body: CommerceCreatePayBody, authorization: Option
             )
             if recent_trade:
                 payload_text = str(recent_trade['callback_payload'] or '')
+                payload_json = _safe_json_loads(payload_text)
                 qr_code_reuse = _extract_qr_from_trade_payload(payload_text)
-                gateway_response_reuse = _safe_json_loads(payload_text).get('gatewayResponse') or {}
-                request_payload_reuse = _safe_json_loads(payload_text).get('request') or {}
+                gateway_response_reuse = payload_json.get('gatewayResponse') or {}
+                request_payload_reuse = payload_json.get('request') or {}
+
+                # 兼容历史订单/迁移订单：复用单没有二维码时，自动重建一次预下单二维码
+                if not str(qr_code_reuse or '').strip():
+                    try:
+                        gateway_response_reuse, qr_code_reuse, request_payload_reuse = _alipay_precreate(
+                            settings,
+                            out_trade_no=str(recent_trade['out_trade_no'] or ''),
+                            amount=round(float(recent_trade['amount'] or amount), 2),
+                            subject=str(recent_trade['plan_name'] or recent_trade['plan_code'] or plan_code),
+                            body=f"AiceMind 套餐升级 {str(recent_trade['plan_code'] or plan_code)}",
+                        )
+
+                        conn.execute(
+                            'UPDATE payment_trades SET callback_payload = ?, updated_at = ? WHERE id = ?',
+                            (
+                                json.dumps(
+                                    {
+                                        'request': request_payload_reuse,
+                                        'gatewayResponse': gateway_response_reuse,
+                                        'scene': 'user_recharge_idempotent_refresh',
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                _now_str(),
+                                str(recent_trade['id'] or ''),
+                            ),
+                        )
+                        conn.commit()
+                    except Exception as e:
+                        return _fail(f'待支付订单二维码重建失败: {e}')
+
                 return _ok(
                     {
                         'orderId': str(recent_trade['order_id'] or ''),

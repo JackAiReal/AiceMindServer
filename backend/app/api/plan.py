@@ -5,6 +5,18 @@ from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
 
+
+def _policy_view(level: str) -> dict[str, Any]:
+    policy = get_entitlement_policy(level)
+    return {
+        'chatMonthlyLimit': int(policy.get('chat_monthly_limit', -1) or -1),
+        'chatDailyLimit': int(policy.get('chat_daily_limit', -1) or -1),
+        'backtestEnabled': bool(policy.get('backtest_enabled', True)),
+        'maxBacktestStocks': int(policy.get('max_backtest_stocks', -1) or -1),
+        'maxBacktestDays': int(policy.get('max_backtest_days', -1) or -1),
+        'reportDownloadEnabled': bool(policy.get('report_download_enabled', True)),
+    }
+
 @router.get('/commerce/plan/list')
 def commerce_list_plans(authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
@@ -37,6 +49,7 @@ def commerce_list_plans(authorization: Optional[str] = Header(default=None)):
                 'dailyPointsRefresh': int(r['daily_points_refresh'] or 0),
                 'backtestPointMultiplier': max(1, int(r['backtest_point_multiplier'] or 1)),
                 'updatedAt': r['updated_at'],
+                **_policy_view(str(r['level'] or 'basic')),
             }
             for r in rows
         ]
@@ -74,6 +87,7 @@ def list_plans(authorization: Optional[str] = Header(default=None)):
                 'dailyPointsRefresh': int(r['daily_points_refresh'] or 0),
                 'backtestPointMultiplier': max(1, int(r['backtest_point_multiplier'] or 1)),
                 'updatedAt': r['updated_at'],
+                **_policy_view(str(r['level'] or 'basic')),
             }
             for r in rows
         ]
@@ -95,6 +109,19 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
 
     daily_points_refresh = max(0, int(body.dailyPointsRefresh or 0))
     backtest_point_multiplier = max(1, int(body.backtestPointMultiplier or 1))
+    chat_monthly_limit = int(body.chatMonthlyLimit if body.chatMonthlyLimit is not None else -1)
+    chat_daily_limit = int(body.chatDailyLimit if body.chatDailyLimit is not None else -1)
+    max_backtest_stocks = int(body.maxBacktestStocks if body.maxBacktestStocks is not None else -1)
+    max_backtest_days = int(body.maxBacktestDays if body.maxBacktestDays is not None else -1)
+
+    if chat_monthly_limit < -1:
+        return _fail('智能对话每月次数不能小于 -1（-1 表示不限）')
+    if chat_daily_limit < -1:
+        return _fail('智能对话每日次数不能小于 -1（-1 表示不限）')
+    if max_backtest_stocks < -1:
+        return _fail('单次回测股票上限不能小于 -1（-1 表示不限）')
+    if max_backtest_days < -1:
+        return _fail('回测时间跨度上限不能小于 -1（-1 表示不限）')
 
     now = _now_str()
     with _DB_LOCK:
@@ -132,10 +159,19 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
             current_policy = get_entitlement_policy(level_key)
             merged_policy = {
                 **current_policy,
+                'chat_enabled': True,
+                'chat_monthly_limit': chat_monthly_limit,
+                'chat_daily_limit': chat_daily_limit,
+                'backtest_enabled': bool(body.backtestEnabled),
+                'backtest_monthly_limit': -1,
+                'backtest_daily_limit': -1,
                 'daily_points_refresh': daily_points_refresh,
                 'backtest_point_multiplier': backtest_point_multiplier,
+                'max_backtest_stocks': max_backtest_stocks,
+                'max_backtest_days': max_backtest_days,
+                'report_download_enabled': bool(body.reportDownloadEnabled),
             }
-            upsert_entitlement_policy(level_key, merged_policy)
+            upsert_entitlement_policy_in_conn(conn, level_key, merged_policy)
 
             _audit_log(
                 conn,
@@ -145,8 +181,14 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 row_id,
                 {
                     'code': code,
+                    'chatMonthlyLimit': chat_monthly_limit,
+                    'chatDailyLimit': chat_daily_limit,
+                    'backtestEnabled': bool(body.backtestEnabled),
                     'dailyPointsRefresh': daily_points_refresh,
                     'backtestPointMultiplier': backtest_point_multiplier,
+                    'maxBacktestStocks': max_backtest_stocks,
+                    'maxBacktestDays': max_backtest_days,
+                    'reportDownloadEnabled': bool(body.reportDownloadEnabled),
                 },
             )
             conn.commit()
@@ -172,6 +214,19 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
 
     daily_points_refresh = max(0, int(body.dailyPointsRefresh or 0))
     backtest_point_multiplier = max(1, int(body.backtestPointMultiplier or 1))
+    chat_monthly_limit = int(body.chatMonthlyLimit if body.chatMonthlyLimit is not None else -1)
+    chat_daily_limit = int(body.chatDailyLimit if body.chatDailyLimit is not None else -1)
+    max_backtest_stocks = int(body.maxBacktestStocks if body.maxBacktestStocks is not None else -1)
+    max_backtest_days = int(body.maxBacktestDays if body.maxBacktestDays is not None else -1)
+
+    if chat_monthly_limit < -1:
+        return _fail('智能对话每月次数不能小于 -1（-1 表示不限）')
+    if chat_daily_limit < -1:
+        return _fail('智能对话每日次数不能小于 -1（-1 表示不限）')
+    if max_backtest_stocks < -1:
+        return _fail('单次回测股票上限不能小于 -1（-1 表示不限）')
+    if max_backtest_days < -1:
+        return _fail('回测时间跨度上限不能小于 -1（-1 表示不限）')
 
     with _DB_LOCK:
         _ensure_db()
@@ -209,10 +264,19 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
             current_policy = get_entitlement_policy(level_key)
             merged_policy = {
                 **current_policy,
+                'chat_enabled': True,
+                'chat_monthly_limit': chat_monthly_limit,
+                'chat_daily_limit': chat_daily_limit,
+                'backtest_enabled': bool(body.backtestEnabled),
+                'backtest_monthly_limit': -1,
+                'backtest_daily_limit': -1,
                 'daily_points_refresh': daily_points_refresh,
                 'backtest_point_multiplier': backtest_point_multiplier,
+                'max_backtest_stocks': max_backtest_stocks,
+                'max_backtest_days': max_backtest_days,
+                'report_download_enabled': bool(body.reportDownloadEnabled),
             }
-            upsert_entitlement_policy(level_key, merged_policy)
+            upsert_entitlement_policy_in_conn(conn, level_key, merged_policy)
 
             _audit_log(
                 conn,
@@ -222,8 +286,14 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 row_id,
                 {
                     'code': code,
+                    'chatMonthlyLimit': chat_monthly_limit,
+                    'chatDailyLimit': chat_daily_limit,
+                    'backtestEnabled': bool(body.backtestEnabled),
                     'dailyPointsRefresh': daily_points_refresh,
                     'backtestPointMultiplier': backtest_point_multiplier,
+                    'maxBacktestStocks': max_backtest_stocks,
+                    'maxBacktestDays': max_backtest_days,
+                    'reportDownloadEnabled': bool(body.reportDownloadEnabled),
                 },
             )
             conn.commit()

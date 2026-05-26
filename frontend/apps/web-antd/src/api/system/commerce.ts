@@ -66,8 +66,15 @@ export interface PlanItem {
   level: string;
   status: string;
   description: string;
+  // 商业化管控
+  chatMonthlyLimit?: number;
+  chatDailyLimit?: number;
+  backtestEnabled?: boolean;
   dailyPointsRefresh?: number;
   backtestPointMultiplier?: number;
+  maxBacktestStocks?: number;
+  maxBacktestDays?: number;
+  reportDownloadEnabled?: boolean;
   updatedAt?: string;
 }
 
@@ -538,6 +545,68 @@ export const listErrorEventsApi = (params?: { limit?: number }) =>
 export const testObservabilityAlertApi = () =>
   requestClient.post('/system/monitor/error/test');
 
+export interface DashboardSummaryResult {
+  overview: {
+    totalUsers: number;
+    activeMembers: number;
+    totalOrders: number;
+    paidOrders: number;
+    paidAmount: number;
+    backtestRuns: number;
+    login24h: number;
+    error24h: number;
+    requestSuccessRate24h: number;
+    p95LatencyMs24h: number;
+  };
+  trend7d: {
+    days: string[];
+    revenue: number[];
+    logins: number[];
+  };
+}
+
+export const getDashboardSummaryApi = () =>
+  requestClient.get<DashboardSummaryResult>('/system/monitor/dashboard-summary');
+
+export const getKpiSummaryApi = () =>
+  requestClient.get('/system/monitor/kpi-summary');
+
+export const runKpiCheckAndAlertApi = () =>
+  requestClient.post('/system/monitor/check-and-alert');
+
+// ===== 备份与灾备 =====
+
+export interface BackupSnapshotItem {
+  id: string;
+  filename: string;
+  engine: string;
+  sizeBytes: number;
+  sha256: string;
+  status: string;
+  note: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export const createBackupSnapshotApi = () =>
+  requestClient.post('/system/backup/create');
+
+export const listBackupSnapshotsApi = (params?: { limit?: number }) =>
+  requestClient.get<BackupSnapshotItem[]>('/system/backup/list', { params });
+
+export const downloadBackupSnapshotApi = (backupId: string) =>
+  requestClient.download('/system/backup/download', {
+    method: 'GET',
+    params: { backupId },
+    responseType: 'blob',
+  });
+
+export const dryRunRestoreBackupApi = (backupId: string, confirmPhrase = 'DRY_RUN') =>
+  requestClient.post('/system/backup/restore-dry-run', { backupId, confirmPhrase });
+
+export const cleanupBackupsApi = (keepDays = 7) =>
+  requestClient.post('/system/backup/cleanup', { keepDays });
+
 // ===== 配置导出/导入 =====
 
 export const exportConfigApi = () =>
@@ -555,3 +624,117 @@ export const importConfigApi = (file: File) => {
     { headers: { 'Content-Type': 'multipart/form-data' } },
   );
 };
+
+// ===== 客户端版本管控 =====
+
+export interface ClientVersionPolicyItem {
+  id: string;
+  appCode: string;
+  target: string;
+  platform: string;
+  channel: string;
+  latestVersion: string;
+  minSupportedVersion: string;
+  enforceExactMatch: boolean;
+  forceUpgrade: boolean;
+  autoUpgradeWithoutConfirm: boolean;
+  title: string;
+  details: string;
+  downloadUrl: string;
+  releaseNotes: string;
+  publishedAt: string;
+  updatedBy: string;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export interface ClientVersionPolicySavePayload {
+  appCode: string;
+  target: string;
+  platform: string;
+  channel: string;
+  latestVersion: string;
+  minSupportedVersion?: string;
+  enforceExactMatch?: boolean;
+  forceUpgrade?: boolean;
+  autoUpgradeWithoutConfirm?: boolean;
+  title?: string;
+  details?: string;
+  downloadUrl?: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+}
+
+export const listVersionPoliciesApi = () =>
+  requestClient.get<ClientVersionPolicyItem[]>('/system/version-policy/list');
+
+export const saveVersionPolicyApi = (payload: ClientVersionPolicySavePayload) =>
+  requestClient.post('/system/version-policy/save', payload);
+
+// ===== Schema Migrations =====
+
+export interface SchemaMigrationItem {
+  version: string;
+  name: string;
+  status: 'applied' | 'pending' | 'rolled_back' | string;
+  appliedAt: string;
+  rolledBackAt: string;
+  rollbackable: boolean;
+}
+
+export const listMigrationsApi = () =>
+  requestClient.get<SchemaMigrationItem[]>('/system/migrations/status');
+
+export const runMigrationsUpApi = () =>
+  requestClient.post<{ applied: string[] }>('/system/migrations/up');
+
+export const runMigrationsDownApi = (steps = 1) =>
+  requestClient.post<{ rolledBack: string[] }>('/system/migrations/down', { steps });
+
+// ===== RBAC =====
+
+export interface RbacPermissionItem {
+  code: string;
+  name: string;
+  resource: string;
+  action: string;
+  description: string;
+  status: string;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export interface RbacRoleItem {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  isSystem: boolean;
+  status: string;
+  permissionCodes: string[];
+  updatedAt: string;
+  createdAt: string;
+}
+
+export const listRbacPermissionsApi = () =>
+  requestClient.get<RbacPermissionItem[]>('/system/rbac/permissions');
+
+export const saveRbacPermissionApi = (payload: Partial<RbacPermissionItem> & { code: string; name: string }) =>
+  requestClient.post('/system/rbac/permissions/save', payload);
+
+export const listRbacRolesApi = () =>
+  requestClient.get<RbacRoleItem[]>('/system/rbac/roles');
+
+export const saveRbacRoleApi = (payload: {
+  code: string;
+  name: string;
+  description?: string;
+  status?: string;
+  permissionCodes?: string[];
+}) => requestClient.post('/system/rbac/roles/save', payload);
+
+export const getAccountRbacRolesApi = (accountId: string) =>
+  requestClient.get<string[]>('/system/rbac/account/roles', { params: { accountId } });
+
+export const saveAccountRbacRolesApi = (payload: { accountId: string; roleCodes: string[] }) =>
+  requestClient.post('/system/rbac/account/roles/save', payload);

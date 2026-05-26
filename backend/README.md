@@ -21,11 +21,11 @@
 # 安装依赖
 pip install -r requirements.txt
 
-# 启动服务 (默认端口 5010)
+# 启动服务 (默认端口 5011)
 python main.py
 ```
 
-API 文档：http://localhost:5010/admin-api/docs
+API 文档：http://localhost:5011/admin-api/docs
 
 ## 架构
 

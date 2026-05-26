@@ -2,6 +2,8 @@
 import type { AnalysisOverviewItem } from '@vben/common-ui';
 import type { TabOption } from '@vben/types';
 
+import { onMounted, ref } from 'vue';
+
 import {
   AnalysisChartCard,
   AnalysisChartsTabs,
@@ -14,42 +16,89 @@ import {
   SvgDownloadIcon,
 } from '@vben/icons';
 
+import { getDashboardSummaryApi } from '#/api/system/commerce';
+
 import AnalyticsTrends from './analytics-trends.vue';
 import AnalyticsVisitsData from './analytics-visits-data.vue';
 import AnalyticsVisitsSales from './analytics-visits-sales.vue';
 import AnalyticsVisitsSource from './analytics-visits-source.vue';
 import AnalyticsVisits from './analytics-visits.vue';
 
-const overviewItems: AnalysisOverviewItem[] = [
+const overviewItems = ref<AnalysisOverviewItem[]>([
   {
     icon: SvgCardIcon,
-    title: '用户量',
+    title: '用户总量',
     totalTitle: '总用户量',
-    totalValue: 120_000,
-    value: 2000,
+    totalValue: 0,
+    value: 0,
   },
   {
     icon: SvgCakeIcon,
-    title: '访问量',
-    totalTitle: '总访问量',
-    totalValue: 500_000,
-    value: 20_000,
+    title: '付费订单',
+    totalTitle: '总订单数',
+    totalValue: 0,
+    value: 0,
   },
   {
     icon: SvgDownloadIcon,
-    title: '下载量',
-    totalTitle: '总下载量',
-    totalValue: 120_000,
-    value: 8000,
+    title: '累计回测',
+    totalTitle: '回测运行数',
+    totalValue: 0,
+    value: 0,
   },
   {
     icon: SvgBellIcon,
-    title: '使用量',
-    totalTitle: '总使用量',
-    totalValue: 50_000,
-    value: 5000,
+    title: '服务稳定性',
+    totalTitle: '24h 请求成功率',
+    totalValue: 100,
+    value: 0,
   },
-];
+]);
+
+const loadDashboard = async () => {
+  try {
+    const data = await getDashboardSummaryApi();
+    const o = data?.overview;
+    if (!o) return;
+
+    overviewItems.value = [
+      {
+        icon: SvgCardIcon,
+        title: '用户总量',
+        totalTitle: '总用户量',
+        totalValue: Number(o.totalUsers || 0),
+        value: Number(o.activeMembers || 0),
+      },
+      {
+        icon: SvgCakeIcon,
+        title: '付费订单',
+        totalTitle: '总订单数',
+        totalValue: Number(o.totalOrders || 0),
+        value: Number(o.paidOrders || 0),
+      },
+      {
+        icon: SvgDownloadIcon,
+        title: '累计回测',
+        totalTitle: '回测运行数',
+        totalValue: Number(o.backtestRuns || 0),
+        value: Number(o.login24h || 0),
+      },
+      {
+        icon: SvgBellIcon,
+        title: '服务稳定性',
+        totalTitle: '24h 请求成功率(%)',
+        totalValue: Number(((o.requestSuccessRate24h || 0) * 100).toFixed(2)),
+        value: Number((o.p95LatencyMs24h || 0).toFixed(2)),
+      },
+    ];
+  } catch {
+    // ignore
+  }
+};
+
+onMounted(() => {
+  loadDashboard();
+});
 
 const chartTabs: TabOption[] = [
   {

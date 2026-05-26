@@ -2918,9 +2918,21 @@ def _build_policy_rights_tips(policy: dict[str, Any]) -> list[str]:
     p = policy or {}
     tips: list[str] = []
 
-    # 精简展示：仅保留回测日次数 + 回测时间跨度上限
-    tips.append(f"策略回测（日）：{_human_limit(p.get('backtest_daily_limit', 3), '次/日')}")
-    tips.append(f"回测时间跨度上限：{_human_limit(p.get('max_backtest_days', 365), '天')}")
+    if bool(p.get('chat_enabled')):
+        tips.append(f"智能对话：{_human_limit(p.get('chat_monthly_limit'), '次/月')} · {_human_limit(p.get('chat_daily_limit'), '次/日')}")
+    else:
+        tips.append('智能对话：未开通')
+
+    if bool(p.get('backtest_enabled')):
+        tips.append('策略回测：会员积分抵扣')
+    else:
+        tips.append('策略回测：未开通')
+
+    tips.append(f"单次回测股票上限：{_human_limit(p.get('max_backtest_stocks'), '只')}")
+    tips.append(f"回测时间跨度上限：{_human_limit(p.get('max_backtest_days'), '天')}")
+    tips.append(f"回测积分倍率：x{max(1, int(p.get('backtest_point_multiplier', 1) or 1))}")
+    tips.append(f"每日积分刷新：{_human_limit(p.get('daily_points_refresh'), '分/日')}")
+    tips.append('报告下载：已开通' if bool(p.get('report_download_enabled')) else '报告下载：未开通')
 
     return tips
 

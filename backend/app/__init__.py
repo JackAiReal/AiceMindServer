@@ -24,6 +24,17 @@ async def lifespan(app: FastAPI):
     db_path = resolve_sqlite_path(Path(__file__).resolve().parents[1] / 'data' / 'admin_console.db')
     db_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"📁 Admin DB path: {db_path}")
+
+    # 启动阶段执行版本化迁移，并标记 DB Ready
+    try:
+        from app.core.migrations import migrate_up
+        applied = migrate_up()
+        from app.api import deps as legacy_deps
+        legacy_deps._DB_READY = True
+        print(f"✅ Admin DB migrated (applied={applied or []})")
+    except Exception as e:
+        print(f"⚠️ Admin DB migration failed: {e}")
+
     yield
     print("🔄 Admin Backend shutting down...")
 

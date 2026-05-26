@@ -5,6 +5,14 @@ from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
 
+
+class BillingFeatureConsumeBody(BaseModel):
+    featureCode: str
+    amount: int = 1
+    source: str = ''
+    refId: str = ''
+    detail: dict[str, Any] | None = None
+
 @router.get('/system/billing/context')
 def billing_context(accountId: str = Query(..., description='账号ID'), authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
@@ -44,6 +52,38 @@ def billing_policy_upsert(body: BillingPolicyBody, authorization: Optional[str] 
             conn.commit()
 
     return _ok(policy)
+
+
+@router.post('/billing/feature/check')
+def billing_feature_check(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    feature_code = str(body.featureCode or '').strip()
+    amount = max(0, int(body.amount or 0))
+    if not feature_code:
+        return _ok({'allowed': False, 'reason': '缺少 featureCode'})
+
+    result = check_feature_access(str(user.get('id') or ''), feature_code, consume_amount=amount)
+    return _ok(result)
+
+
+@router.post('/billing/feature/consume')
+def billing_feature_consume(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    feature_code = str(body.featureCode or '').strip()
+    amount = max(0, int(body.amount or 0))
+    if not feature_code:
+        return _ok({'allowed': False, 'reason': '缺少 featureCode'})
+
+    result = consume_feature_quota(
+        str(user.get('id') or ''),
+        feature_code,
+        amount=amount,
+        source=str(body.source or '').strip() or 'remote.consume',
+        ref_id=str(body.refId or '').strip(),
+        detail=body.detail or {},
+    )
+    return _ok(result)
+
 
 @router.get('/system/billing/usage')
 def billing_usage(

@@ -18,7 +18,7 @@ COPY main.py .
 RUN mkdir -p /app/data
 
 # 暴露端口
-EXPOSE 5010
+EXPOSE 5011
 
 # 启动命令
 CMD ["python", "main.py"]

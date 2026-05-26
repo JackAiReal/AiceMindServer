@@ -10,7 +10,7 @@ export default defineConfig(async () => {
             changeOrigin: true,
             rewrite: (path) => path.replace(/^\/admin-api/, ''),
             // 真实管理后端代理目标地址（独立 AiceMindServer 后端）
-            target: 'http://localhost:5010/admin-api',
+            target: 'http://localhost:5011/admin-api',
             ws: true,
           },
         },

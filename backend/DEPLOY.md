@@ -65,16 +65,16 @@ mkdir -p data
 cat .env
 ```
 
-当前 `.env` 内容：
+当前 `.env` 可选两种数据库：
 ```env
-# AiceMind Admin Backend 环境配置
-# 完全独立的后台系统，不依赖外部 Membership API
-
-# 数据库路径（默认 data/admin_console.db）
+# SQLite（本地开发）
 # AICEMIND_DB_URL=sqlite:///data/admin_console.db
+
+# MySQL（生产推荐）
+# AICEMIND_DB_URL=mysql://user:password@127.0.0.1:3306/aicemind_admin?charset=utf8mb4
 ```
 
-> 一般不需要修改，保持默认即可。
+> 生产环境建议改为 MySQL，并确保账号有建表/建索引权限（首次启动会自动初始化）。
 
 ### 第三步：执行一键部署
 
@@ -90,11 +90,13 @@ chmod +x deploy.sh
 - ✅ 启动容器
 - ✅ 执行健康检查
 
+> 新增：服务启动时会自动执行数据库迁移（schema_migrations）。
+
 ### 第四步：验证服务是否启动
 
 ```bash
 # 健康检查
-curl http://127.0.0.1:5010/admin-api/health
+curl http://127.0.0.1:5011/admin-api/health
 
 # 预期返回：
 # {"status":"healthy","service":"aicemind-admin"}
@@ -109,7 +111,7 @@ docker logs -f aicemind-admin
 
 ```nginx
 location /admin-api/ {
-    proxy_pass http://127.0.0.1:5010/admin-api/;
+    proxy_pass http://127.0.0.1:5011/admin-api/;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -148,6 +150,9 @@ location /admin-api/ {
 | `docker compose up -d --build` | 重新构建并启动 |
 | `docker logs -f aicemind-admin` | 查看实时日志 |
 | `docker exec -it aicemind-admin sh` | 进入容器 |
+| `python manage_migrations.py status` | 查看迁移状态 |
+| `python manage_migrations.py up` | 执行待迁移版本 |
+| `python manage_migrations.py down --steps 1` | 回滚最近一版（若支持） |
 
 ---
 
@@ -155,7 +160,7 @@ location /admin-api/ {
 
 1. **数据库初始化**：首次启动时会自动创建 SQLite 数据库和表结构，无需手动执行 SQL
 2. **数据持久化**：`data/` 目录挂载到容器外，升级时不会丢失数据
-3. **端口安全**：5010 只监听 127.0.0.1，不直接暴露外网，通过 Nginx 反代访问
+3. **端口安全**：5011 只监听 127.0.0.1（或容器内网），不直接暴露外网，通过 Nginx 反代访问
 4. **HTTPS**：生产环境务必配置 HTTPS，尤其涉及支付回调等敏感操作
 5. **修改密码**：首次登录后务必修改默认管理员密码
 
