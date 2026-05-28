@@ -538,6 +538,56 @@ export const listErrorEventsApi = (params?: { limit?: number }) =>
 export const testObservabilityAlertApi = () =>
   requestClient.post('/system/monitor/error/test');
 
+export interface SensitiveSecretItem {
+  id: string;
+  key: string;
+  name: string;
+  category: string;
+  description: string;
+  enabled: boolean;
+  clientAccessLevel: 'admin' | 'authenticated' | 'entitled' | string;
+  updatedBy: string;
+  lastAccessedAt: string;
+  updatedAt: string;
+  createdAt: string;
+  hasValue: boolean;
+  maskedValue: string;
+}
+
+export interface SensitiveSecretResolveResult {
+  key: string;
+  name: string;
+  category: string;
+  description: string;
+  enabled?: boolean;
+  clientAccessLevel?: string;
+  value: string;
+  updatedAt?: string;
+}
+
+export const listSensitiveSecretsApi = (params?: { category?: string }) =>
+  requestClient.get<SensitiveSecretItem[]>('/system/sensitive-secrets/list', { params });
+
+export const saveSensitiveSecretApi = (payload: {
+  key: string;
+  name?: string;
+  category?: string;
+  value?: string;
+  description?: string;
+  enabled?: boolean;
+  clientAccessLevel?: 'admin' | 'authenticated' | 'entitled' | string;
+  clearValue?: boolean;
+}) => requestClient.post('/system/sensitive-secrets/save', payload);
+
+export const deleteSensitiveSecretApi = (key: string) =>
+  requestClient.post('/system/sensitive-secrets/delete', { key });
+
+export const resolveSensitiveSecretApi = (key: string) =>
+  requestClient.post<SensitiveSecretResolveResult>('/system/sensitive-secrets/resolve', { key });
+
+export const clientResolveSensitiveSecretApi = (payload: { key: string }) =>
+  requestClient.post<SensitiveSecretResolveResult>('/client/sensitive-secrets/resolve', payload);
+
 // ===== 配置导出/导入 =====
 
 export const exportConfigApi = () =>

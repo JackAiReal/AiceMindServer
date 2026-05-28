@@ -44,6 +44,7 @@ def create_app():
         allow_origin_regex=(
             r"^https?://("
             r"localhost(:\d+)?|"
+            r"tauri\.localhost(:\d+)?|"
             r"127\.0\.0\.1(:\d+)?|"
             r"192\.168\.\d{1,3}\.\d{1,3}(:\d+)?|"
             r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?|"

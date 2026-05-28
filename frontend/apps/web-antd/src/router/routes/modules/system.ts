@@ -22,6 +22,15 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        name: 'SystemSensitiveSecrets',
+        path: '/system/sensitive-secrets',
+        component: () => import('#/views/system/sensitive-secrets/index.vue'),
+        meta: {
+          icon: 'mdi:key-chain-variant',
+          title: '敏感数据',
+        },
+      },
+      {
         name: 'SystemTools',
         path: '/system/tools',
         component: () => import('#/views/system/system-tools/index.vue'),

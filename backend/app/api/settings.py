@@ -11,6 +11,531 @@ from app.api.deps import *  # noqa: F401,F403
 router = APIRouter()
 
 
+# ===== 客户端版本管控 =====
+
+class VersionPolicySaveBody(BaseModel):
+    appCode: str = 'AiceMind'
+    target: str = 'backtest-desktop'
+    platform: str = 'all'
+    channel: str = 'stable'
+    latestVersion: str = ''
+    minSupportedVersion: str = ''
+    enforceExactMatch: bool = True
+    forceUpgrade: bool = True
+    autoUpgradeWithoutConfirm: bool = False
+    title: str = '发现新版本，请升级后继续使用'
+    details: str = ''
+    downloadUrl: str = ''
+    releaseNotes: str = ''
+    publishedAt: str = ''
+
+
+class VersionCheckBody(BaseModel):
+    appCode: str = 'AiceMind'
+    target: str = 'backtest-desktop'
+    platform: str = 'all'
+    channel: str = 'stable'
+    currentVersion: str = ''
+
+
+_SECRET_STREAM_INFO = b'AiceMindSensitiveSecretStream'
+_SECRET_MAC_INFO = b'AiceMindSensitiveSecretMac'
+_SECRET_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$')
+
+
+def _decode_secret_master_key_text(text: str) -> bytes:
+    raw = str(text or '').strip()
+    if not raw:
+        return b''
+    compact = ''.join(raw.split())
+    if compact:
+        try:
+            padding = '=' * (-len(compact) % 4)
+            data = base64.urlsafe_b64decode((compact + padding).encode('utf-8'))
+            if data:
+                return data
+        except Exception:
+            pass
+    return raw.encode('utf-8')
+
+
+def _load_secret_master_key() -> bytes:
+    for env_name in _SECRET_MASTER_KEY_ENV_NAMES:
+        env_value = os.environ.get(env_name, '')
+        data = _decode_secret_master_key_text(env_value)
+        if data:
+            return hashlib.sha256(data).digest()
+
+    try:
+        if _SECRET_MASTER_KEY_FILE.exists():
+            file_value = _SECRET_MASTER_KEY_FILE.read_text(encoding='utf-8')
+            data = _decode_secret_master_key_text(file_value)
+            if data:
+                return hashlib.sha256(data).digest()
+    except Exception:
+        pass
+
+    seed = os.urandom(32)
+    try:
+        _SECRET_MASTER_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SECRET_MASTER_KEY_FILE.write_text(base64.urlsafe_b64encode(seed).decode('utf-8'), encoding='utf-8')
+    except Exception:
+        pass
+    return hashlib.sha256(seed).digest()
+
+
+def _secret_stream_bytes(key: bytes, nonce: bytes, size: int) -> bytes:
+    if size <= 0:
+        return b''
+    out = bytearray()
+    counter = 0
+    while len(out) < size:
+        block = hmac.new(key, nonce + counter.to_bytes(4, 'big'), hashlib.sha256).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(out[:size])
+
+
+def _secret_encrypt_value(value: str) -> str:
+    text = str(value or '')
+    if not text:
+        return ''
+    if text.startswith(_SECRET_CIPHER_PREFIX):
+        try:
+            _secret_decrypt_value(text)
+            return text
+        except Exception:
+            pass
+
+    master = _load_secret_master_key()
+    enc_key = hmac.new(master, _SECRET_STREAM_INFO, hashlib.sha256).digest()
+    mac_key = hmac.new(master, _SECRET_MAC_INFO, hashlib.sha256).digest()
+    nonce = os.urandom(16)
+    plain = text.encode('utf-8')
+    stream = _secret_stream_bytes(enc_key, nonce, len(plain))
+    cipher = bytes([a ^ b for a, b in zip(plain, stream)])
+    digest = hmac.new(mac_key, nonce + cipher, hashlib.sha256).digest()
+    payload = base64.urlsafe_b64encode(nonce + cipher + digest).decode('utf-8').rstrip('=')
+    return _SECRET_CIPHER_PREFIX + payload
+
+
+def _secret_decrypt_value(value: str) -> str:
+    text = str(value or '')
+    if not text:
+        return ''
+    if not text.startswith(_SECRET_CIPHER_PREFIX):
+        return text
+
+    encoded = text[len(_SECRET_CIPHER_PREFIX):]
+    padding = '=' * (-len(encoded) % 4)
+    payload = base64.urlsafe_b64decode((encoded + padding).encode('utf-8'))
+    if len(payload) < 48:
+        raise ValueError('invalid secret payload')
+
+    nonce = payload[:16]
+    digest = payload[-32:]
+    cipher = payload[16:-32]
+
+    master = _load_secret_master_key()
+    enc_key = hmac.new(master, _SECRET_STREAM_INFO, hashlib.sha256).digest()
+    mac_key = hmac.new(master, _SECRET_MAC_INFO, hashlib.sha256).digest()
+    expected = hmac.new(mac_key, nonce + cipher, hashlib.sha256).digest()
+    if not hmac.compare_digest(digest, expected):
+        raise ValueError('secret integrity check failed')
+
+    stream = _secret_stream_bytes(enc_key, nonce, len(cipher))
+    plain = bytes([a ^ b for a, b in zip(cipher, stream)])
+    return plain.decode('utf-8')
+
+
+def _normalize_sensitive_secret_key(value: str) -> str:
+    key = str(value or '').strip()
+    if not _SECRET_KEY_RE.fullmatch(key):
+        raise ValueError('key 仅支持字母、数字、点、下划线、短横线、冒号，长度 2-128')
+    return key
+
+
+def _normalize_secret_access_level(value: str) -> str:
+    level = str(value or 'admin').strip().lower() or 'admin'
+    if level not in _SECRET_ACCESS_LEVELS:
+        return 'admin'
+    return level
+
+
+def _serialize_sensitive_secret(row: Any) -> dict[str, Any]:
+    secret_value = str(row['secret_value'] or '')
+    return {
+        'id': str(row['id'] or ''),
+        'key': str(row['secret_key'] or ''),
+        'name': str(row['name'] or ''),
+        'category': str(row['category'] or ''),
+        'description': str(row['description'] or ''),
+        'enabled': bool(int(row['enabled'] or 0)),
+        'clientAccessLevel': _normalize_secret_access_level(row['client_access_level'] or 'admin'),
+        'updatedBy': str(row['updated_by'] or ''),
+        'lastAccessedAt': str(row['last_accessed_at'] or ''),
+        'updatedAt': str(row['updated_at'] or ''),
+        'createdAt': str(row['created_at'] or ''),
+        'hasValue': bool(secret_value),
+        'maskedValue': _mask_secret(_secret_decrypt_value(secret_value)) if secret_value else '',
+    }
+
+
+def _touch_sensitive_secret_access(conn: sqlite3.Connection, row_id: str):
+    conn.execute(
+        'UPDATE sensitive_secrets SET last_accessed_at = ?, updated_at = updated_at WHERE id = ?',
+        (_now_str(), row_id),
+    )
+
+
+def _require_sensitive_secret_client_user(access_level: str, authorization: Optional[str]):
+    level = _normalize_secret_access_level(access_level)
+    if level == 'admin':
+        user = _require_user(authorization)
+        _require_permission(user, 'system.secret.read')
+        return user
+    if level == 'authenticated':
+        return _require_user(authorization)
+    user, _ = _require_entitled_user(authorization)
+    return user
+
+
+def _normalize_version(v: str) -> str:
+    return str(v or '').strip().lstrip('vV')
+
+
+def _version_parts(v: str) -> list[int]:
+    n = _normalize_version(v)
+    if not n:
+        return []
+    nums = re.findall(r'\d+', n)
+    return [int(x) for x in nums] if nums else []
+
+
+def _cmp_version(a: str, b: str) -> int:
+    pa = _version_parts(a)
+    pb = _version_parts(b)
+    m = max(len(pa), len(pb))
+    pa += [0] * (m - len(pa))
+    pb += [0] * (m - len(pb))
+    for i in range(m):
+        if pa[i] < pb[i]:
+            return -1
+        if pa[i] > pb[i]:
+            return 1
+    return 0
+
+
+def _serialize_version_policy(row: Any) -> dict[str, Any]:
+    return {
+        'id': str(row['id'] or ''),
+        'appCode': str(row['app_code'] or ''),
+        'target': str(row['target'] or ''),
+        'platform': str(row['platform'] or ''),
+        'channel': str(row['channel'] or ''),
+        'latestVersion': str(row['latest_version'] or ''),
+        'minSupportedVersion': str(row['min_supported_version'] or ''),
+        'enforceExactMatch': bool(int(row['enforce_exact_match'] or 0)),
+        'forceUpgrade': bool(int(row['force_upgrade'] or 0)),
+        'autoUpgradeWithoutConfirm': bool(int(row['auto_upgrade_without_confirm'] or 0)),
+        'title': str(row['title'] or ''),
+        'details': str(row['details'] or ''),
+        'downloadUrl': str(row['download_url'] or ''),
+        'releaseNotes': str(row['release_notes'] or ''),
+        'publishedAt': str(row['published_at'] or ''),
+        'updatedBy': str(row['updated_by'] or ''),
+        'updatedAt': str(row['updated_at'] or ''),
+        'createdAt': str(row['created_at'] or ''),
+    }
+
+
+def _find_best_version_policy(
+    conn: sqlite3.Connection,
+    app_code: str,
+    target: str,
+    platform: str,
+    channel: str,
+):
+    candidates = [
+        (app_code, target, platform, channel),
+        (app_code, target, 'all', channel),
+        (app_code, target, platform, 'stable'),
+        (app_code, target, 'all', 'stable'),
+    ]
+
+    for a, t, p, c in candidates:
+        row = conn.execute(
+            '''
+            SELECT *
+            FROM client_version_policies
+            WHERE app_code = ? AND target = ? AND platform = ? AND channel = ?
+            LIMIT 1
+            ''',
+            (a, t, p, c),
+        ).fetchone()
+        if row:
+            return row
+    return None
+
+
+@router.get('/system/version-policy/list')
+def list_version_policies(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.version_policy.read')
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                '''
+                SELECT *
+                FROM client_version_policies
+                ORDER BY app_code ASC, target ASC, platform ASC, channel ASC, updated_at DESC
+                '''
+            ).fetchall()
+
+    return _ok([_serialize_version_policy(r) for r in rows])
+
+
+@router.post('/system/version-policy/save')
+def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.version_policy.manage')
+
+    app_code = str(body.appCode or 'AiceMind').strip() or 'AiceMind'
+    target = str(body.target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform = str(body.platform or 'all').strip() or 'all'
+    channel = str(body.channel or 'stable').strip() or 'stable'
+
+    latest_version = _normalize_version(body.latestVersion)
+    min_supported = _normalize_version(body.minSupportedVersion)
+
+    if not latest_version:
+        return _fail('latestVersion 不能为空')
+
+    if min_supported and _cmp_version(min_supported, latest_version) > 0:
+        return _fail('minSupportedVersion 不能高于 latestVersion')
+
+    now = _now_str()
+    actor = str(user.get('username') or user.get('id') or '').strip()
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            exists = conn.execute(
+                '''
+                SELECT id FROM client_version_policies
+                WHERE app_code = ? AND target = ? AND platform = ? AND channel = ?
+                LIMIT 1
+                ''',
+                (app_code, target, platform, channel),
+            ).fetchone()
+
+            row_id = str(exists['id'] if exists else uuid.uuid4().hex)
+
+            if exists:
+                conn.execute(
+                    '''
+                    UPDATE client_version_policies
+                    SET latest_version = ?,
+                        min_supported_version = ?,
+                        enforce_exact_match = ?,
+                        force_upgrade = ?,
+                        auto_upgrade_without_confirm = ?,
+                        title = ?,
+                        details = ?,
+                        download_url = ?,
+                        release_notes = ?,
+                        published_at = ?,
+                        updated_by = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    ''',
+                    (
+                        latest_version,
+                        min_supported,
+                        1 if body.enforceExactMatch else 0,
+                        1 if body.forceUpgrade else 0,
+                        1 if body.autoUpgradeWithoutConfirm else 0,
+                        str(body.title or '').strip() or '发现新版本，请升级后继续使用',
+                        str(body.details or '').strip(),
+                        str(body.downloadUrl or '').strip(),
+                        str(body.releaseNotes or '').strip(),
+                        str(body.publishedAt or '').strip(),
+                        actor,
+                        now,
+                        row_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    '''
+                    INSERT INTO client_version_policies (
+                        id, app_code, target, platform, channel,
+                        latest_version, min_supported_version,
+                        enforce_exact_match, force_upgrade, auto_upgrade_without_confirm,
+                        title, details, download_url, release_notes,
+                        published_at, updated_by, updated_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        row_id,
+                        app_code,
+                        target,
+                        platform,
+                        channel,
+                        latest_version,
+                        min_supported,
+                        1 if body.enforceExactMatch else 0,
+                        1 if body.forceUpgrade else 0,
+                        1 if body.autoUpgradeWithoutConfirm else 0,
+                        str(body.title or '').strip() or '发现新版本，请升级后继续使用',
+                        str(body.details or '').strip(),
+                        str(body.downloadUrl or '').strip(),
+                        str(body.releaseNotes or '').strip(),
+                        str(body.publishedAt or '').strip(),
+                        actor,
+                        now,
+                        now,
+                    ),
+                )
+
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.version_policy.save',
+                'client_version_policies',
+                row_id,
+                {
+                    'appCode': app_code,
+                    'target': target,
+                    'platform': platform,
+                    'channel': channel,
+                    'latestVersion': latest_version,
+                    'minSupportedVersion': min_supported,
+                    'forceUpgrade': bool(body.forceUpgrade),
+                    'autoUpgradeWithoutConfirm': bool(body.autoUpgradeWithoutConfirm),
+                },
+            )
+            conn.commit()
+
+    return _ok(True, message='版本策略已保存')
+
+
+@router.post('/public/version/check')
+def public_version_check(body: VersionCheckBody):
+    app_code = str(body.appCode or 'AiceMind').strip() or 'AiceMind'
+    target = str(body.target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform = str(body.platform or 'all').strip() or 'all'
+    channel = str(body.channel or 'stable').strip() or 'stable'
+    current = _normalize_version(body.currentVersion)
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = _find_best_version_policy(conn, app_code, target, platform, channel)
+
+    if not row:
+        return _ok(
+            {
+                'appCode': app_code,
+                'target': target,
+                'platform': platform,
+                'channel': channel,
+                'currentVersion': current,
+                'allowRun': True,
+                'needUpgrade': False,
+                'forceUpgrade': False,
+                'autoUpgradeWithoutConfirm': False,
+                'reason': 'no_policy',
+            }
+        )
+
+    latest = _normalize_version(str(row['latest_version'] or ''))
+    minimum = _normalize_version(str(row['min_supported_version'] or ''))
+    enforce_exact = bool(int(row['enforce_exact_match'] or 0))
+    force_upgrade = bool(int(row['force_upgrade'] or 0))
+    auto_upgrade = bool(int(row['auto_upgrade_without_confirm'] or 0))
+
+    need_upgrade = False
+    allow_run = True
+    reason = 'ok'
+
+    if enforce_exact:
+        need_upgrade = (not current) or _cmp_version(current, latest) != 0
+        allow_run = not need_upgrade
+        if need_upgrade:
+            reason = 'exact_version_required'
+    else:
+        if latest and current and _cmp_version(current, latest) < 0:
+            need_upgrade = True
+            reason = 'new_version_available'
+        if minimum and (not current or _cmp_version(current, minimum) < 0):
+            need_upgrade = True
+            allow_run = not force_upgrade
+            reason = 'below_min_supported'
+
+    if enforce_exact and need_upgrade:
+        allow_run = not force_upgrade
+
+    return _ok(
+        {
+            'appCode': app_code,
+            'target': target,
+            'platform': platform,
+            'channel': channel,
+            'currentVersion': current,
+            'latestVersion': latest,
+            'minSupportedVersion': minimum,
+            'enforceExactMatch': enforce_exact,
+            'allowRun': allow_run,
+            'needUpgrade': need_upgrade,
+            'forceUpgrade': force_upgrade,
+            'autoUpgradeWithoutConfirm': auto_upgrade,
+            'title': str(row['title'] or ''),
+            'details': str(row['details'] or ''),
+            'downloadUrl': str(row['download_url'] or ''),
+            'releaseNotes': str(row['release_notes'] or ''),
+            'publishedAt': str(row['published_at'] or ''),
+            'reason': reason,
+        }
+    )
+
+
+class MigrationDownBody(BaseModel):
+    steps: int = 1
+
+
+@router.get('/system/migrations/status')
+def get_migrations_status(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    data = migration_status()
+    return _ok(data)
+
+
+@router.post('/system/migrations/up')
+def run_migrations_up(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    applied = migrate_up()
+    return _ok({'applied': applied}, message='迁移执行完成')
+
+
+@router.post('/system/migrations/down')
+def run_migrations_down(body: MigrationDownBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.rbac.manage')
+
+    steps = max(1, int(body.steps or 1))
+    rolled = migrate_down(steps)
+    return _ok({'rolledBack': rolled}, message='回滚执行完成')
+
+
 # ===== 配置导出/导入 =====
 
 _CONFIG_TABLES = {
@@ -49,6 +574,14 @@ _CONFIG_TABLES = {
         'single': True,
         'id_col': 'id',
         'cols': ['sentry_dsn', 'alert_webhook', 'alert_emails'],
+    },
+    'sensitive_secrets': {
+        'single': False,
+        'id_col': 'id',
+        'cols': [
+            'id', 'secret_key', 'name', 'category', 'secret_value', 'description',
+            'enabled', 'client_access_level', 'updated_by', 'last_accessed_at',
+        ],
     },
     'legal_docs': {
         'single': False,
@@ -123,6 +656,16 @@ def _import_table(conn: sqlite3.Connection, table_name: str, meta: dict, rows: l
             extra_cols = ['updated_at', 'created_at']
         elif table_name == 'plans':
             extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'client_version_policies':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'sensitive_secrets':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'rbac_permissions':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name == 'rbac_roles':
+            extra_cols = ['updated_at', 'created_at']
+        elif table_name in ('rbac_role_permissions', 'rbac_account_roles'):
+            extra_cols = ['created_at']
 
         for row in rows:
             values = [row.get(c) for c in cols]
@@ -224,6 +767,304 @@ def import_config(
     )
 
     return _ok({'results': results}, message='配置导入完成')
+
+
+# ===== 敏感数据管理 =====
+
+@router.get('/system/sensitive-secrets/list')
+def list_sensitive_secrets(
+    authorization: Optional[str] = Header(default=None),
+    category: str = Query('', description='按分类筛选，可选'),
+):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.secret.manage')
+
+    category_key = str(category or '').strip()
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            if category_key:
+                rows = conn.execute(
+                    '''
+                    SELECT *
+                    FROM sensitive_secrets
+                    WHERE category = ?
+                    ORDER BY category ASC, secret_key ASC, updated_at DESC
+                    ''',
+                    (category_key,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    '''
+                    SELECT *
+                    FROM sensitive_secrets
+                    ORDER BY category ASC, secret_key ASC, updated_at DESC
+                    '''
+                ).fetchall()
+
+    return _ok([_serialize_sensitive_secret(r) for r in rows])
+
+
+@router.post('/system/sensitive-secrets/save')
+def save_sensitive_secret(body: SensitiveSecretItemBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.secret.manage')
+
+    try:
+        secret_key = _normalize_sensitive_secret_key(body.key)
+    except ValueError as e:
+        return _fail(str(e))
+
+    secret_name = str(body.name or '').strip() or secret_key
+    category = str(body.category or 'general').strip() or 'general'
+    description = str(body.description or '').strip()
+    enabled = 1 if body.enabled else 0
+    access_level = _normalize_secret_access_level(body.clientAccessLevel)
+    clear_value = bool(body.clearValue)
+    input_value = str(body.value or '')
+    actor = str(user.get('username') or user.get('id') or '').strip()
+    now = _now_str()
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            exists = conn.execute(
+                'SELECT * FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                (secret_key,),
+            ).fetchone()
+
+            row_id = str(exists['id'] if exists else uuid.uuid4().hex)
+            current_secret_value = str((exists['secret_value'] if exists else '') or '')
+            if clear_value:
+                next_secret_value = ''
+            elif input_value == '' and exists is not None:
+                next_secret_value = current_secret_value
+            else:
+                next_secret_value = _secret_encrypt_value(input_value)
+
+            if exists:
+                conn.execute(
+                    '''
+                    UPDATE sensitive_secrets
+                    SET name = ?,
+                        category = ?,
+                        secret_value = ?,
+                        description = ?,
+                        enabled = ?,
+                        client_access_level = ?,
+                        updated_by = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    ''',
+                    (
+                        secret_name,
+                        category,
+                        next_secret_value,
+                        description,
+                        enabled,
+                        access_level,
+                        actor,
+                        now,
+                        row_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    '''
+                    INSERT INTO sensitive_secrets (
+                        id, secret_key, name, category, secret_value, description,
+                        enabled, client_access_level, updated_by, last_accessed_at, updated_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    ''',
+                    (
+                        row_id,
+                        secret_key,
+                        secret_name,
+                        category,
+                        next_secret_value,
+                        description,
+                        enabled,
+                        access_level,
+                        actor,
+                        now,
+                        now,
+                    ),
+                )
+
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.secret.save',
+                'sensitive_secrets',
+                row_id,
+                {
+                    'key': secret_key,
+                    'category': category,
+                    'enabled': bool(enabled),
+                    'clientAccessLevel': access_level,
+                    'valueChanged': clear_value or input_value != '',
+                    'cleared': clear_value,
+                },
+            )
+            conn.commit()
+
+    return _ok(True, message='敏感数据已保存')
+
+
+@router.post('/system/sensitive-secrets/delete')
+def delete_sensitive_secret(body: SensitiveSecretResolveBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.secret.manage')
+
+    try:
+        secret_key = _normalize_sensitive_secret_key(body.key)
+    except ValueError as e:
+        return _fail(str(e))
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT id FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                (secret_key,),
+            ).fetchone()
+            if not row:
+                return _fail('敏感数据不存在')
+
+            conn.execute('DELETE FROM sensitive_secrets WHERE id = ?', (str(row['id'] or ''),))
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.secret.delete',
+                'sensitive_secrets',
+                str(row['id'] or ''),
+                {'key': secret_key},
+            )
+            conn.commit()
+
+    return _ok(True, message='敏感数据已删除')
+
+
+@router.post('/system/sensitive-secrets/resolve')
+def resolve_sensitive_secret(body: SensitiveSecretResolveBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_permission(user, 'system.secret.read')
+
+    try:
+        secret_key = _normalize_sensitive_secret_key(body.key)
+    except ValueError as e:
+        return _fail(str(e))
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT * FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                (secret_key,),
+            ).fetchone()
+            if not row:
+                return _fail('敏感数据不存在')
+
+            try:
+                plaintext = _secret_decrypt_value(str(row['secret_value'] or ''))
+            except Exception as e:
+                return _fail(f'敏感数据解密失败: {e}')
+
+            _touch_sensitive_secret_access(conn, str(row['id'] or ''))
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.secret.resolve',
+                'sensitive_secrets',
+                str(row['id'] or ''),
+                {'key': secret_key},
+            )
+            conn.commit()
+
+    return _ok(
+        {
+            'key': str(row['secret_key'] or ''),
+            'name': str(row['name'] or ''),
+            'category': str(row['category'] or ''),
+            'description': str(row['description'] or ''),
+            'enabled': bool(int(row['enabled'] or 0)),
+            'clientAccessLevel': _normalize_secret_access_level(row['client_access_level'] or 'admin'),
+            'value': plaintext,
+        }
+    )
+
+
+@router.post('/client/sensitive-secrets/resolve')
+def client_resolve_sensitive_secret(
+    body: SensitiveSecretResolveBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    try:
+        secret_key = _normalize_sensitive_secret_key(body.key)
+    except ValueError as e:
+        return _fail(str(e))
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT * FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                (secret_key,),
+            ).fetchone()
+            if not row:
+                return _fail('敏感数据不存在')
+            if int(row['enabled'] or 0) != 1:
+                return _fail('敏感数据未启用')
+
+    user = _require_sensitive_secret_client_user(str(row['client_access_level'] or 'admin'), authorization)
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                'SELECT * FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                (secret_key,),
+            ).fetchone()
+            if not row:
+                return _fail('敏感数据不存在')
+            if int(row['enabled'] or 0) != 1:
+                return _fail('敏感数据未启用')
+
+            try:
+                plaintext = _secret_decrypt_value(str(row['secret_value'] or ''))
+            except Exception as e:
+                return _fail(f'敏感数据解密失败: {e}')
+
+            _touch_sensitive_secret_access(conn, str(row['id'] or ''))
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'client.secret.resolve',
+                'sensitive_secrets',
+                str(row['id'] or ''),
+                {
+                    'key': secret_key,
+                    'clientAccessLevel': _normalize_secret_access_level(row['client_access_level'] or 'admin'),
+                },
+            )
+            conn.commit()
+
+    return _ok(
+        {
+            'key': str(row['secret_key'] or ''),
+            'name': str(row['name'] or ''),
+            'category': str(row['category'] or ''),
+            'description': str(row['description'] or ''),
+            'value': plaintext,
+            'updatedAt': str(row['updated_at'] or ''),
+        }
+    )
 
 
 # ===== 原有接口 =====

@@ -76,6 +76,10 @@ _DEFAULT_VERIFY_BODY_TEMPLATE = (
     '如果这不是你的操作，请忽略本邮件。\n'
     '{{app_name}} 团队'
 )
+_SECRET_MASTER_KEY_ENV_NAMES = ('AICEMIND_SECRET_MASTER_KEY', 'AICEMIND_SECRET_KEY')
+_SECRET_MASTER_KEY_FILE = resolve_sqlite_path(Path(__file__).resolve().parents[2] / 'data' / '.secret-master.key')
+_SECRET_CIPHER_PREFIX = 'enc:v1:'
+_SECRET_ACCESS_LEVELS = {'admin', 'authenticated', 'entitled'}
 
 _ADMIN_SEED_USERS = {
     'superadmin': {
@@ -340,6 +344,21 @@ class ObservabilitySettingsBody(BaseModel):
     sentryDsn: str = ''
     alertWebhook: str = ''
     alertEmails: str = ''
+
+
+class SensitiveSecretItemBody(BaseModel):
+    key: str
+    name: str = ''
+    category: str = 'general'
+    value: str = ''
+    description: str = ''
+    enabled: bool = True
+    clientAccessLevel: str = 'admin'
+    clearValue: bool = False
+
+
+class SensitiveSecretResolveBody(BaseModel):
+    key: str
 
 
 class LegalDocSaveBody(BaseModel):
@@ -973,6 +992,26 @@ def _ensure_db():
             )
             '''
         )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sensitive_secrets (
+                id TEXT PRIMARY KEY,
+                secret_key TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                secret_value TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                client_access_level TEXT NOT NULL DEFAULT 'admin',
+                updated_by TEXT NOT NULL DEFAULT '',
+                last_accessed_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sensitive_secrets_category ON sensitive_secrets(category, enabled, updated_at DESC)')
 
         conn.execute(
             '''
@@ -3306,6 +3345,174 @@ def _require_user(authorization: Optional[str]) -> dict[str, Any]:
     return user
 
 
+def _init_rbac_defaults(conn: sqlite3.Connection):
+    now = _now_str()
+
+    default_permissions = [
+        ('*', '超级权限', 'system', '*', '超级管理员全量权限'),
+        ('system.rbac.manage', 'RBAC 管理', 'system', 'rbac.manage', '角色与权限配置'),
+        ('system.config.export', '配置导出', 'system', 'config.export', '系统配置导出'),
+        ('system.config.import', '配置导入', 'system', 'config.import', '系统配置导入'),
+        ('system.version_policy.read', '版本策略查看', 'system', 'version_policy.read', '查看版本策略'),
+        ('system.version_policy.manage', '版本策略管理', 'system', 'version_policy.manage', '编辑版本策略'),
+        ('system.security.manage', '安全策略管理', 'system', 'security.manage', '管理安全中心与会话'),
+        ('system.payment.manage', '支付配置管理', 'system', 'payment.manage', '支付设置与通道配置'),
+        ('system.secret.manage', '敏感数据管理', 'system', 'secret.manage', '管理敏感数据加密配置'),
+        ('system.secret.read', '敏感数据读取', 'system', 'secret.read', '读取敏感数据明文'),
+        ('system.order.manage', '订单管理', 'system', 'order.manage', '订单状态管理与退款'),
+        ('system.audit.read', '审计查看', 'system', 'audit.read', '查看审计日志'),
+        ('system.monitor.read', '监控查看', 'system', 'monitor.read', '查看监控指标与错误'),
+    ]
+
+    for code, name, resource, action, desc in default_permissions:
+        exists = conn.execute('SELECT code FROM rbac_permissions WHERE code = ? LIMIT 1', (code,)).fetchone()
+        if exists:
+            conn.execute(
+                'UPDATE rbac_permissions SET name = ?, resource = ?, action = ?, description = ?, status = ?, updated_at = ? WHERE code = ?',
+                (name, resource, action, desc, 'active', now, code),
+            )
+        else:
+            conn.execute(
+                '''
+                INSERT INTO rbac_permissions (code, name, resource, action, description, status, updated_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                ''',
+                (code, name, resource, action, desc, now, now),
+            )
+
+    role_specs = [
+        ('super', '超级管理员', '系统全量权限'),
+        ('admin', '管理员', '系统管理权限（可细化）'),
+    ]
+    for role_code, role_name, role_desc in role_specs:
+        row = conn.execute('SELECT id FROM rbac_roles WHERE code = ? LIMIT 1', (role_code,)).fetchone()
+        role_id = str(row['id'] if row else uuid.uuid4().hex)
+        if row:
+            conn.execute(
+                'UPDATE rbac_roles SET name = ?, description = ?, is_system = 1, status = ?, updated_at = ? WHERE id = ?',
+                (role_name, role_desc, 'active', now, role_id),
+            )
+        else:
+            conn.execute(
+                '''
+                INSERT INTO rbac_roles (id, code, name, description, is_system, status, updated_at, created_at)
+                VALUES (?, ?, ?, ?, 1, 'active', ?, ?)
+                ''',
+                (role_id, role_code, role_name, role_desc, now, now),
+            )
+
+        # 自动绑定已有 user_accounts 中同名角色用户
+        rows = conn.execute('SELECT id, roles FROM user_accounts').fetchall()
+        for r in rows or []:
+            account_id = str(r['id'] or '')
+            roles_raw = str(r['roles'] or '')
+            roles = set(_normalize_roles(roles_raw))
+            if role_code in roles:
+                exists_map = conn.execute(
+                    'SELECT 1 FROM rbac_account_roles WHERE account_id = ? AND role_code = ? LIMIT 1',
+                    (account_id, role_code),
+                ).fetchone()
+                if not exists_map:
+                    conn.execute(
+                        'INSERT INTO rbac_account_roles (id, account_id, role_code, created_at) VALUES (?, ?, ?, ?)',
+                        (uuid.uuid4().hex, account_id, role_code, now),
+                    )
+
+        # 系统默认角色权限
+        role_perms = ['*'] if role_code == 'super' else [
+            'system.config.export',
+            'system.config.import',
+            'system.version_policy.read',
+            'system.version_policy.manage',
+            'system.security.manage',
+            'system.payment.manage',
+            'system.secret.manage',
+            'system.secret.read',
+            'system.order.manage',
+            'system.audit.read',
+            'system.monitor.read',
+        ]
+        for p in role_perms:
+            rp = conn.execute(
+                'SELECT 1 FROM rbac_role_permissions WHERE role_code = ? AND permission_code = ? LIMIT 1',
+                (role_code, p),
+            ).fetchone()
+            if not rp:
+                conn.execute(
+                    'INSERT INTO rbac_role_permissions (id, role_code, permission_code, created_at) VALUES (?, ?, ?, ?)',
+                    (uuid.uuid4().hex, role_code, p, now),
+                )
+
+
+def _get_user_roles(conn: sqlite3.Connection, user: dict[str, Any]) -> set[str]:
+    roles = set(user.get('roles') or [])
+    account_id = str(user.get('id') or '').strip()
+    if not account_id:
+        return roles
+    rows = conn.execute('SELECT role_code FROM rbac_account_roles WHERE account_id = ?', (account_id,)).fetchall()
+    for row in rows or []:
+        role_code = str(row['role_code'] or '').strip()
+        if role_code:
+            roles.add(role_code)
+    return roles
+
+
+def _get_user_permissions(conn: sqlite3.Connection, user: dict[str, Any]) -> set[str]:
+    roles = _get_user_roles(conn, user)
+    if 'super' in roles:
+        return {'*'}
+
+    perms: set[str] = set()
+    for role in roles:
+        rows = conn.execute(
+            'SELECT permission_code FROM rbac_role_permissions WHERE role_code = ?',
+            (role,),
+        ).fetchall()
+        for row in rows or []:
+            p = str(row['permission_code'] or '').strip()
+            if p:
+                perms.add(p)
+    return perms
+
+
+def _has_permission(conn: sqlite3.Connection, user: dict[str, Any], permission_code: str) -> bool:
+    perms = _get_user_permissions(conn, user)
+    if '*' in perms:
+        return True
+    target = str(permission_code or '').strip()
+    if not target:
+        return True
+    if target in perms:
+        return True
+    # 支持 system.* 形式
+    prefixes = target.split('.')
+    for i in range(1, len(prefixes)):
+        wildcard = '.'.join(prefixes[:i]) + '.*'
+        if wildcard in perms:
+            return True
+    return False
+
+
+def _require_permission(user: dict[str, Any], permission_code: str):
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                _init_rbac_defaults(conn)
+                if not _has_permission(conn, user, permission_code):
+                    raise HTTPException(status_code=403, detail='Forbidden')
+                return
+            except HTTPException:
+                raise
+            except Exception:
+                # 兼容兜底：RBAC 表未就绪时按历史 admin 逻辑
+                roles = set(user.get('roles') or [])
+                if {'super', 'admin'} & roles:
+                    return
+                raise HTTPException(status_code=403, detail='Forbidden')
+
+
 def _require_admin(user: dict[str, Any]):
     roles = set(user.get('roles') or [])
     if not ({'super', 'admin'} & roles):
@@ -3468,6 +3675,15 @@ def _build_system_menu() -> dict[str, Any]:
                     'title': '安全与合规',
                 },
                 'children': [
+                    {
+                        'name': 'SystemSensitiveSecrets',
+                        'path': '/system/sensitive-secrets',
+                        'component': '/system/sensitive-secrets/index',
+                        'meta': {
+                            'icon': 'mdi:key-chain-variant',
+                            'title': '敏感数据',
+                        },
+                    },
                     {
                         'name': 'SystemSecurityCenter',
                         'path': '/system/security-center',
