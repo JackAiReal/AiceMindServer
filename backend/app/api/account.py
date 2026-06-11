@@ -124,6 +124,15 @@ def get_account_entitlement_summary(authorization: Optional[str] = Header(defaul
 
     summary = get_billing_context(account_id)
     entitlement = dict(summary.get('entitlement') or _load_user_entitlement(user) or {})
+    policy = dict(summary.get('policy') or {})
+    if 'max_backtest_days' not in entitlement:
+        entitlement['max_backtest_days'] = int(policy.get('max_backtest_days', 365) or 365)
+    if 'backtest_daily_limit' not in entitlement:
+        entitlement['backtest_daily_limit'] = int(policy.get('backtest_daily_limit', 0) or 0)
+    if policy.get('planCode'):
+        entitlement['plan_code'] = policy.get('planCode')
+        entitlement['plan_name'] = policy.get('planName')
+
     summary['accountId'] = account_id
     summary['entitlement'] = entitlement
     return _ok(summary)
@@ -265,6 +274,16 @@ def process_account_delete_request(body: AccountDeleteProcessBody, authorization
 def admin_user_info(authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
     entitlement = user.get('entitlement') or _load_user_entitlement(user)
+    policy = get_effective_entitlement_policy(str(user.get('id') or ''), entitlement)
+
+    entitlement_payload = dict(entitlement or {})
+    if 'max_backtest_days' not in entitlement_payload:
+        entitlement_payload['max_backtest_days'] = int(policy.get('max_backtest_days', 365) or 365)
+    if 'backtest_daily_limit' not in entitlement_payload:
+        entitlement_payload['backtest_daily_limit'] = int(policy.get('backtest_daily_limit', 0) or 0)
+    if policy.get('planCode'):
+        entitlement_payload['plan_code'] = policy.get('planCode')
+        entitlement_payload['plan_name'] = policy.get('planName')
 
     return _ok(
         {
@@ -275,7 +294,7 @@ def admin_user_info(authorization: Optional[str] = Header(default=None)):
             'email': user['email'],
             'homePath': user['homePath'],
             'avatar': f"https://avatar.vercel.sh/{user['username']}",
-            'entitlement': entitlement,
+            'entitlement': entitlement_payload,
         }
     )
 

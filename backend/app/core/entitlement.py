@@ -589,137 +589,141 @@ def _resolve_consume_amount(feature: str, amount: int, policy: dict[str, Any]) -
     return consume, multiplier
 
 
+def _get_active_plan_override(account_id: str) -> dict[str, Any]:
+    account = str(account_id or '').strip()
+    if not account:
+        return {}
+
+    now_str = _now_str()
+    with _db_connect() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            '''
+            SELECT p.code, p.name, p.level, p.backtest_daily_limit, p.max_backtest_days,
+                   s.start_time, s.expire_time, s.updated_at
+            FROM subscriptions s
+            JOIN plans p ON p.code = s.plan_code
+            WHERE s.account_id = ?
+              AND s.status = 'active'
+              AND p.status = 'active'
+              AND datetime(COALESCE(s.expire_time, '')) > datetime(?)
+            ORDER BY datetime(s.expire_time) DESC, datetime(s.updated_at) DESC
+            LIMIT 1
+            ''',
+            (account, now_str),
+        ).fetchone()
+
+    if not row:
+        return {}
+
+    return {
+        'planCode': str(row['code'] or ''),
+        'planName': str(row['name'] or ''),
+        'planLevel': _normalize_level(row['level']),
+        'backtest_daily_limit': int(row['backtest_daily_limit'] or 0),
+        'max_backtest_days': int(row['max_backtest_days'] or 0),
+        'start_at': str(row['start_time'] or ''),
+        'expire_at': str(row['expire_time'] or ''),
+    }
+
+
+def get_effective_entitlement_policy(account_id: str, entitlement: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    entitlement = entitlement or get_entitlement_for_account(account_id)
+    level = _normalize_level((entitlement or {}).get('level'))
+    policy = get_entitlement_policy(level)
+    plan_override = _get_active_plan_override(account_id)
+    if plan_override:
+        policy = dict(policy)
+        policy['backtest_daily_limit'] = int(plan_override.get('backtest_daily_limit', policy.get('backtest_daily_limit', 0)) or 0)
+        policy['max_backtest_days'] = int(plan_override.get('max_backtest_days', policy.get('max_backtest_days', 0)) or 0)
+        policy['planCode'] = plan_override.get('planCode') or ''
+        policy['planName'] = plan_override.get('planName') or ''
+        policy['planLevel'] = plan_override.get('planLevel') or level
+    return policy
+
+
 def check_feature_access(account_id: str, feature_code: str, consume_amount: int = 0) -> dict[str, Any]:
-    _refresh_daily_points_if_needed(account_id)
-    entitlement = get_entitlement_for_account(account_id)
+    """精简版权益校验：仅对 backtest.run 做限制（每日次数 + 时间范围上限）。"""
+    feature = str(feature_code or '').strip()
+    raw_amount = max(0, int(consume_amount or 0))
+    amount = max(1, raw_amount) if raw_amount > 0 else 1
+
+    if feature != 'backtest.run':
+        return {
+            'allowed': True,
+            'reason': 'ok',
+            'featureCode': feature,
+            'consumeAmount': raw_amount,
+            'dailyQuota': -1,
+            'dailyUsed': 0,
+            'dailyRemaining': -1,
+            'quota': -1,
+            'used': 0,
+            'remaining': -1,
+            'policy': {},
+            'entitlement': {'level': 'basic', 'status': 'active', 'is_active': True, 'source': 'simplified'},
+        }
+
+    account = str(account_id or '').strip()
+    if not account:
+        return {
+            'allowed': False,
+            'reason': '缺少有效账号标识',
+            'featureCode': feature,
+            'consumeAmount': raw_amount,
+        }
+
+    entitlement = get_entitlement_for_account(account)
     if not is_entitlement_active(entitlement):
         return {
             'allowed': False,
             'reason': str(entitlement.get('reason') or '会员不可用，请续费后继续使用'),
-            'entitlement': entitlement,
-            'featureCode': feature_code,
-            'consumeAmount': int(consume_amount or 0),
-        }
-
-    feature = str(feature_code or '').strip()
-    raw_amount = max(0, int(consume_amount or 0))
-
-    level = _normalize_level(entitlement.get('level'))
-    policy = get_entitlement_policy(level)
-    amount, multiplier = _resolve_consume_amount(feature, raw_amount, policy)
-    enabled_key, month_limit_key = _FEATURE_LIMIT_KEY_MAP.get(feature, (None, None))
-    day_limit_key = _FEATURE_DAILY_LIMIT_KEY_MAP.get(feature)
-
-    if enabled_key and not bool(policy.get(enabled_key)):
-        return {
-            'allowed': False,
-            'reason': '当前会员等级未开通该功能',
-            'entitlement': entitlement,
             'featureCode': feature,
-            'policy': policy,
+            'consumeAmount': raw_amount,
+            'entitlement': entitlement,
         }
 
-    points_balance = _get_member_points(account_id) if feature == 'backtest.run' else -1
-    if feature == 'backtest.run' and amount > 0 and points_balance < amount:
-        return {
-            'allowed': False,
-            'reason': f'积分不足（当前 {points_balance}，本次需要 {amount}）',
-            'entitlement': entitlement,
-            'featureCode': feature,
-            'rawConsumeAmount': raw_amount,
-            'consumeAmount': amount,
-            'consumeMultiplier': multiplier,
-            'pointsBalance': points_balance,
-            'policy': policy,
-        }
+    policy = get_effective_entitlement_policy(account, entitlement)
+
+    try:
+        day_limit = int(policy.get('backtest_daily_limit', 0))
+    except Exception:
+        day_limit = 0
 
     day_period_key = _period_key_for_feature(feature, scope='day')
-    month_period_key = _period_key_for_feature(feature, scope='month')
-
-    day_used = get_feature_usage(account_id, feature, day_period_key)
-    month_used = get_feature_usage(account_id, feature, month_period_key)
-
-    day_limit = -1
-    if day_limit_key:
-        try:
-            day_limit = int(policy.get(day_limit_key, -1))
-        except Exception:
-            day_limit = -1
-
-    month_limit = -1
-    if month_limit_key:
-        try:
-            month_limit = int(policy.get(month_limit_key, -1))
-        except Exception:
-            month_limit = -1
+    day_used = get_feature_usage(account, feature, day_period_key)
 
     if day_limit >= 0:
         day_remaining_before = max(0, day_limit - day_used)
         if day_remaining_before < amount:
             return {
                 'allowed': False,
-                'reason': f'今日配额不足（已用 {day_used}/{day_limit}）',
-                'entitlement': entitlement,
+                'reason': f'今日回测次数不足（已用 {day_used}/{day_limit}）',
                 'featureCode': feature,
-                'periodKey': month_period_key,
                 'dayPeriodKey': day_period_key,
                 'dailyQuota': day_limit,
                 'dailyUsed': day_used,
                 'dailyRemaining': day_remaining_before,
-                'quota': month_limit,
-                'used': month_used,
-                'remaining': max(0, month_limit - month_used) if month_limit >= 0 else -1,
-                'rawConsumeAmount': raw_amount,
                 'consumeAmount': amount,
-                'consumeMultiplier': multiplier,
-                'pointsBalance': points_balance,
                 'policy': policy,
-            }
-
-    if month_limit >= 0:
-        month_remaining_before = max(0, month_limit - month_used)
-        if month_remaining_before < amount:
-            return {
-                'allowed': False,
-                'reason': f'本月配额不足（已用 {month_used}/{month_limit}）',
                 'entitlement': entitlement,
-                'featureCode': feature,
-                'periodKey': month_period_key,
-                'dayPeriodKey': day_period_key,
-                'dailyQuota': day_limit,
-                'dailyUsed': day_used,
-                'dailyRemaining': max(0, day_limit - day_used) if day_limit >= 0 else -1,
-                'quota': month_limit,
-                'used': month_used,
-                'remaining': month_remaining_before,
-                'rawConsumeAmount': raw_amount,
-                'consumeAmount': amount,
-                'consumeMultiplier': multiplier,
-                'pointsBalance': points_balance,
-                'policy': policy,
             }
 
-    day_remaining_after = (max(0, day_limit - day_used - amount) if day_limit >= 0 else -1)
-    month_remaining_after = (max(0, month_limit - month_used - amount) if month_limit >= 0 else -1)
-
+    day_remaining_after = max(0, day_limit - day_used - amount) if day_limit >= 0 else -1
     return {
         'allowed': True,
         'reason': 'ok',
-        'entitlement': entitlement,
         'featureCode': feature,
-        'periodKey': month_period_key,
         'dayPeriodKey': day_period_key,
         'dailyQuota': day_limit,
         'dailyUsed': day_used,
         'dailyRemaining': day_remaining_after,
-        'quota': month_limit,
-        'used': month_used,
-        'remaining': month_remaining_after,
-        'rawConsumeAmount': raw_amount,
         'consumeAmount': amount,
-        'consumeMultiplier': multiplier,
-        'pointsBalance': points_balance,
+        'quota': -1,
+        'used': 0,
+        'remaining': -1,
         'policy': policy,
+        'entitlement': entitlement,
     }
 
 
@@ -759,65 +763,6 @@ def consume_feature_quota(
     period_key = str(check_result.get('dayPeriodKey') or _period_key_for_feature(feature, scope='day'))
     with _db_connect() as conn:
         conn.row_factory = sqlite3.Row
-
-        if feature == 'backtest.run' and actual_consume > 0:
-            identity = get_account_identity(account)
-            username = str((identity or {}).get('username') or '').strip().lower()
-            email = str((identity or {}).get('email') or '').strip().lower()
-
-            member_row = conn.execute(
-                '''
-                SELECT id, points
-                FROM member_users
-                WHERE lower(user_id) = ? OR lower(email) = ?
-                ORDER BY datetime(updated_at) DESC
-                LIMIT 1
-                ''',
-                (username, email),
-            ).fetchone()
-            if not member_row:
-                return {
-                    'allowed': False,
-                    'reason': '积分账户不存在，请联系管理员',
-                    'featureCode': feature,
-                }
-
-            before_points = int(member_row['points'] or 0)
-            if before_points < actual_consume:
-                return {
-                    'allowed': False,
-                    'reason': f'积分不足（当前 {before_points}，本次需要 {actual_consume}）',
-                    'featureCode': feature,
-                }
-
-            after_points = before_points - actual_consume
-            now_str = _now_str()
-            conn.execute(
-                'UPDATE member_users SET points = ?, updated_at = ? WHERE id = ?',
-                (after_points, now_str, str(member_row['id'] or '')),
-            )
-            conn.execute(
-                '''
-                INSERT INTO points_ledger (
-                    id, account_id, username, delta, points_before, points_after,
-                    reason, source, ref_id, actor_account_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    uuid.uuid4().hex,
-                    account,
-                    username,
-                    -actual_consume,
-                    before_points,
-                    after_points,
-                    'backtest points consume',
-                    str(source or 'backtest.run'),
-                    str(ref_id or ''),
-                    account,
-                    now_str,
-                ),
-            )
-
         conn.execute(
             '''
             INSERT INTO billing_usage_ledger (
@@ -843,40 +788,54 @@ def consume_feature_quota(
 
 
 def get_billing_context(account_id: str) -> dict[str, Any]:
-    entitlement = get_entitlement_for_account(account_id)
-    level = _normalize_level(entitlement.get('level'))
-    policy = get_entitlement_policy(level)
-
-    month_period = datetime.now().strftime('%Y-%m')
+    """精简版权益上下文：暴露“每日回测次数 + 回测时间跨度上限”。"""
     day_period = datetime.now().strftime('%Y-%m-%d')
+    month_period = datetime.now().strftime('%Y-%m')
 
-    usage_monthly = {
-        'chat.message': get_feature_usage(account_id, 'chat.message', month_period),
-        'backtest.run': get_feature_usage(account_id, 'backtest.run', month_period),
-    }
-    usage_daily = {
-        'chat.message': get_feature_usage(account_id, 'chat.message', day_period),
-        'backtest.run': get_feature_usage(account_id, 'backtest.run', day_period),
-    }
+    entitlement = get_entitlement_for_account(account_id)
+    policy = get_effective_entitlement_policy(account_id, entitlement)
+
+    try:
+        backtest_daily_limit = int(policy.get('backtest_daily_limit', 0))
+    except Exception:
+        backtest_daily_limit = 0
+
+    try:
+        max_backtest_days = int(policy.get('max_backtest_days', 365))
+    except Exception:
+        max_backtest_days = 365
+
+    usage_daily_backtest = get_feature_usage(account_id, 'backtest.run', day_period)
 
     return {
         'accountId': str(account_id or ''),
         'period': month_period,
         'dayPeriod': day_period,
         'entitlement': entitlement,
-        'policy': policy,
-        'usage': usage_monthly,
-        'usageDaily': usage_daily,
-        'limits': {
-            'chatMonthlyLimit': int(policy.get('chat_monthly_limit', -1)),
-            'backtestMonthlyLimit': int(policy.get('backtest_monthly_limit', -1)),
-            'chatDailyLimit': int(policy.get('chat_daily_limit', -1)),
-            'backtestDailyLimit': int(policy.get('backtest_daily_limit', -1)),
-            'backtestPointMultiplier': int(policy.get('backtest_point_multiplier', 1)),
-            'dailyPointsRefresh': int(policy.get('daily_points_refresh', 0)),
-            'maxBacktestStocks': int(policy.get('max_backtest_stocks', -1)),
-            'maxBacktestDays': int(policy.get('max_backtest_days', -1)),
+        'policy': {
+            'backtest_daily_limit': backtest_daily_limit,
+            'max_backtest_days': max_backtest_days,
+            'planCode': policy.get('planCode', ''),
+            'planName': policy.get('planName', ''),
+            'planLevel': policy.get('planLevel', ''),
         },
+        'usage': {
+            'backtest.run': get_feature_usage(account_id, 'backtest.run', month_period),
+        },
+        'usageDaily': {
+            'backtest.run': usage_daily_backtest,
+        },
+        'limits': {
+            'backtestDailyLimit': backtest_daily_limit,
+            'maxBacktestDays': max_backtest_days,
+            'chatMonthlyLimit': -1,
+            'backtestMonthlyLimit': -1,
+            'chatDailyLimit': -1,
+            'backtestPointMultiplier': 1,
+            'dailyPointsRefresh': 0,
+            'maxBacktestStocks': -1,
+        },
+        'pointsBalance': 0,
     }
 
 

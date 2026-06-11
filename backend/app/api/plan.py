@@ -16,7 +16,7 @@ def commerce_list_plans(authorization: Optional[str] = Header(default=None)):
             rows = conn.execute(
                 '''
                 SELECT id, code, name, price, duration_days, level, status, description,
-                       daily_points_refresh, backtest_point_multiplier, updated_at
+                       backtest_daily_limit, max_backtest_days, updated_at
                 FROM plans
                 WHERE status = 'active'
                 ORDER BY price ASC, duration_days ASC, datetime(updated_at) DESC
@@ -34,8 +34,8 @@ def commerce_list_plans(authorization: Optional[str] = Header(default=None)):
                 'level': r['level'] or 'basic',
                 'status': r['status'],
                 'description': r['description'] or '',
-                'dailyPointsRefresh': int(r['daily_points_refresh'] or 0),
-                'backtestPointMultiplier': max(1, int(r['backtest_point_multiplier'] or 1)),
+                'backtestDailyLimit': int(r['backtest_daily_limit'] or 0),
+                'maxBacktestDays': int(r['max_backtest_days'] or 0),
                 'updatedAt': r['updated_at'],
             }
             for r in rows
@@ -54,7 +54,7 @@ def list_plans(authorization: Optional[str] = Header(default=None)):
             rows = conn.execute(
                 '''
                 SELECT id, code, name, price, duration_days, level, status, description,
-                       daily_points_refresh, backtest_point_multiplier, updated_at
+                       backtest_daily_limit, max_backtest_days, updated_at
                 FROM plans
                 ORDER BY datetime(updated_at) DESC
                 '''
@@ -71,8 +71,8 @@ def list_plans(authorization: Optional[str] = Header(default=None)):
                 'level': r['level'],
                 'status': r['status'],
                 'description': r['description'],
-                'dailyPointsRefresh': int(r['daily_points_refresh'] or 0),
-                'backtestPointMultiplier': max(1, int(r['backtest_point_multiplier'] or 1)),
+                'backtestDailyLimit': int(r['backtest_daily_limit'] or 0),
+                'maxBacktestDays': int(r['max_backtest_days'] or 0),
                 'updatedAt': r['updated_at'],
             }
             for r in rows
@@ -93,8 +93,10 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
     if body.price < 0:
         return _fail('套餐价格不能为负数')
 
-    daily_points_refresh = max(0, int(body.dailyPointsRefresh or 0))
-    backtest_point_multiplier = max(1, int(body.backtestPointMultiplier or 1))
+    backtest_daily_limit = max(0, int(body.backtestDailyLimit or 0))
+    max_backtest_days = int(body.maxBacktestDays or 0)
+    if max_backtest_days == 0:
+        return _fail('最大回测天数不能为 0')
 
     now = _now_str()
     with _DB_LOCK:
@@ -108,7 +110,7 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 '''
                 INSERT INTO plans (
                     id, code, name, price, duration_days, level, status, description,
-                    daily_points_refresh, backtest_point_multiplier,
+                    backtest_daily_limit, max_backtest_days,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
@@ -121,21 +123,12 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                     str(body.level or 'basic').strip() or 'basic',
                     str(body.status or 'active').strip() or 'active',
                     str(body.description or '').strip(),
-                    daily_points_refresh,
-                    backtest_point_multiplier,
+                    backtest_daily_limit,
+                    max_backtest_days,
                     now,
                     now,
                 ),
             )
-
-            level_key = str(body.level or 'basic').strip() or 'basic'
-            current_policy = get_entitlement_policy(level_key)
-            merged_policy = {
-                **current_policy,
-                'daily_points_refresh': daily_points_refresh,
-                'backtest_point_multiplier': backtest_point_multiplier,
-            }
-            upsert_entitlement_policy(level_key, merged_policy)
 
             _audit_log(
                 conn,
@@ -145,8 +138,8 @@ def create_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 row_id,
                 {
                     'code': code,
-                    'dailyPointsRefresh': daily_points_refresh,
-                    'backtestPointMultiplier': backtest_point_multiplier,
+                    'backtestDailyLimit': backtest_daily_limit,
+                    'maxBacktestDays': max_backtest_days,
                 },
             )
             conn.commit()
@@ -170,8 +163,10 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
     if body.price < 0:
         return _fail('套餐价格不能为负数')
 
-    daily_points_refresh = max(0, int(body.dailyPointsRefresh or 0))
-    backtest_point_multiplier = max(1, int(body.backtestPointMultiplier or 1))
+    backtest_daily_limit = max(0, int(body.backtestDailyLimit or 0))
+    max_backtest_days = int(body.maxBacktestDays or 0)
+    if max_backtest_days == 0:
+        return _fail('最大回测天数不能为 0')
 
     with _DB_LOCK:
         _ensure_db()
@@ -187,7 +182,7 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 '''
                 UPDATE plans
                 SET code = ?, name = ?, price = ?, duration_days = ?, level = ?, status = ?, description = ?,
-                    daily_points_refresh = ?, backtest_point_multiplier = ?, updated_at = ?
+                    backtest_daily_limit = ?, max_backtest_days = ?, updated_at = ?
                 WHERE id = ?
                 ''',
                 (
@@ -198,21 +193,12 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                     str(body.level or 'basic').strip() or 'basic',
                     str(body.status or 'active').strip() or 'active',
                     str(body.description or '').strip(),
-                    daily_points_refresh,
-                    backtest_point_multiplier,
+                    backtest_daily_limit,
+                    max_backtest_days,
                     _now_str(),
                     row_id,
                 ),
             )
-
-            level_key = str(body.level or 'basic').strip() or 'basic'
-            current_policy = get_entitlement_policy(level_key)
-            merged_policy = {
-                **current_policy,
-                'daily_points_refresh': daily_points_refresh,
-                'backtest_point_multiplier': backtest_point_multiplier,
-            }
-            upsert_entitlement_policy(level_key, merged_policy)
 
             _audit_log(
                 conn,
@@ -222,8 +208,8 @@ def update_plan(body: PlanBody, authorization: Optional[str] = Header(default=No
                 row_id,
                 {
                     'code': code,
-                    'dailyPointsRefresh': daily_points_refresh,
-                    'backtestPointMultiplier': backtest_point_multiplier,
+                    'backtestDailyLimit': backtest_daily_limit,
+                    'maxBacktestDays': max_backtest_days,
                 },
             )
             conn.commit()

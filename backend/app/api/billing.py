@@ -5,6 +5,43 @@ from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
 
+@router.post('/billing/feature/check')
+def billing_feature_check(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    account_id = str(user.get('id') or '').strip()
+    if not account_id:
+        return _fail('账号不存在')
+
+    result = check_feature_access(
+        account_id,
+        str(body.featureCode or '').strip(),
+        consume_amount=max(0, int(body.amount or 0)),
+    )
+    if not result.get('allowed'):
+        return _fail(str(result.get('reason') or '权益校验失败'), result)
+    return _ok(result)
+
+
+@router.post('/billing/feature/consume')
+def billing_feature_consume(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    account_id = str(user.get('id') or '').strip()
+    if not account_id:
+        return _fail('账号不存在')
+
+    result = consume_feature_quota(
+        account_id,
+        str(body.featureCode or '').strip(),
+        amount=max(0, int(body.amount or 0)),
+        source=str(body.source or '').strip(),
+        ref_id=str(body.refId or '').strip(),
+        detail=body.detail or {},
+    )
+    if not result.get('allowed'):
+        return _fail(str(result.get('reason') or '权益扣减失败'), result)
+    return _ok(result)
+
+
 @router.get('/system/billing/context')
 def billing_context(accountId: str = Query(..., description='账号ID'), authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)

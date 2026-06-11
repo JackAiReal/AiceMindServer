@@ -37,8 +37,8 @@ interface PlanFormState {
   level: PlanLevel;
   status: PlanStatus;
   description: string;
-  dailyPointsRefresh: number;
-  backtestPointMultiplier: number;
+  backtestDailyLimit: number;
+  maxBacktestDays: number;
 }
 
 const loading = ref(false);
@@ -55,8 +55,8 @@ const formState = reactive<PlanFormState>({
   level: 'basic',
   status: 'active',
   description: '',
-  dailyPointsRefresh: 50,
-  backtestPointMultiplier: 1,
+  backtestDailyLimit: 10,
+  maxBacktestDays: 365,
 });
 
 const isEdit = computed(() => !!formState.id);
@@ -91,8 +91,8 @@ const resetForm = () => {
   formState.level = 'basic';
   formState.status = 'active';
   formState.description = '';
-  formState.dailyPointsRefresh = 50;
-  formState.backtestPointMultiplier = 1;
+  formState.backtestDailyLimit = 10;
+  formState.maxBacktestDays = 365;
 };
 
 const onCreate = () => {
@@ -109,8 +109,8 @@ const onEdit = (row: PlanItem) => {
   formState.level = (row.level as PlanLevel) || 'basic';
   formState.status = (row.status as PlanStatus) || 'active';
   formState.description = row.description || '';
-  formState.dailyPointsRefresh = Number(row.dailyPointsRefresh || 0);
-  formState.backtestPointMultiplier = Math.max(1, Number(row.backtestPointMultiplier || 1));
+  formState.backtestDailyLimit = Number(row.backtestDailyLimit || 0);
+  formState.maxBacktestDays = Number(row.maxBacktestDays || 365);
   formOpen.value = true;
 };
 
@@ -129,12 +129,12 @@ const onSubmit = async () => {
     message.error('套餐价格不能为负数');
     return;
   }
-  if (formState.dailyPointsRefresh < 0) {
-    message.error('每日刷新积分不能为负数');
+  if (formState.backtestDailyLimit < 0) {
+    message.error('每日回测次数不能为负数');
     return;
   }
-  if (formState.backtestPointMultiplier <= 0) {
-    message.error('回测积分倍率必须大于 0');
+  if (formState.maxBacktestDays === 0) {
+    message.error('最大回测天数不能为 0');
     return;
   }
 
@@ -149,8 +149,8 @@ const onSubmit = async () => {
       level: formState.level,
       status: formState.status,
       description: formState.description.trim(),
-      dailyPointsRefresh: Number(formState.dailyPointsRefresh || 0),
-      backtestPointMultiplier: Math.max(1, Number(formState.backtestPointMultiplier || 1)),
+      backtestDailyLimit: Number(formState.backtestDailyLimit || 0),
+      maxBacktestDays: Number(formState.maxBacktestDays || 365),
     };
 
     if (isEdit.value) {
@@ -206,11 +206,11 @@ onMounted(() => {
         </ATable.Column>
         <ATable.Column title="时长(天)" data-index="durationDays" key="durationDays" width="110" />
         <ATable.Column title="等级" data-index="level" key="level" width="100" />
-        <ATable.Column title="每日刷新积分" key="dailyPointsRefresh" width="130">
-          <template #default="{ record }">{{ Number(record.dailyPointsRefresh || 0) }}</template>
+        <ATable.Column title="每日回测次数" key="backtestDailyLimit" width="130">
+          <template #default="{ record }">{{ Number(record.backtestDailyLimit || 0) }}</template>
         </ATable.Column>
-        <ATable.Column title="回测积分倍率" key="backtestPointMultiplier" width="130">
-          <template #default="{ record }">x{{ Math.max(1, Number(record.backtestPointMultiplier || 1)) }}</template>
+        <ATable.Column title="最大回测天数" key="maxBacktestDays" width="130">
+          <template #default="{ record }">{{ Number(record.maxBacktestDays || 0) < 0 ? '不限' : Number(record.maxBacktestDays || 0) }}</template>
         </ATable.Column>
         <ATable.Column title="状态" key="status" width="100">
           <template #default="{ record }">
@@ -260,11 +260,11 @@ onMounted(() => {
         <AFormItem label="状态" required>
           <ASelect v-model:value="formState.status" :options="statusOptions" />
         </AFormItem>
-        <AFormItem label="每日刷新积分" required>
-          <AInputNumber v-model:value="formState.dailyPointsRefresh" :min="0" :precision="0" style="width: 100%" />
+        <AFormItem label="每日回测次数" required>
+          <AInputNumber v-model:value="formState.backtestDailyLimit" :min="0" :precision="0" style="width: 100%" />
         </AFormItem>
-        <AFormItem label="回测积分倍率" required>
-          <AInputNumber v-model:value="formState.backtestPointMultiplier" :min="1" :precision="0" style="width: 100%" />
+        <AFormItem label="最大回测天数" required>
+          <AInputNumber v-model:value="formState.maxBacktestDays" :precision="0" style="width: 100%" />
         </AFormItem>
         <AFormItem label="描述">
           <AInput.TextArea v-model:value="formState.description" :rows="3" placeholder="套餐说明（选填）" />

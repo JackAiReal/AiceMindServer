@@ -27,12 +27,15 @@ from pydantic import BaseModel
 
 from app.core.db_runtime import connect_sqlite, describe_runtime, resolve_sqlite_path
 from app.core.entitlement import (
+    consume_feature_quota,
     get_account_identity,
     get_billing_context,
+    get_effective_entitlement_policy,
     get_entitlement_for_account,
     get_entitlement_policy,
     get_feature_usage,
     is_entitlement_active,
+    check_feature_access,
     upsert_entitlement_policy,
 )
 
@@ -249,8 +252,8 @@ class PlanBody(BaseModel):
     level: str = 'basic'
     status: str = 'active'
     description: str = ''
-    dailyPointsRefresh: int = 0
-    backtestPointMultiplier: int = 1
+    backtestDailyLimit: int = 10
+    maxBacktestDays: int = 365
 
 
 class SubscriptionUpsertBody(BaseModel):
@@ -322,6 +325,14 @@ class PaymentInitiateBody(BaseModel):
 class BillingPolicyBody(BaseModel):
     level: str
     policy: dict[str, Any] = {}
+
+
+class BillingFeatureConsumeBody(BaseModel):
+    featureCode: str
+    amount: int = 0
+    source: str = ''
+    refId: str = ''
+    detail: Optional[dict[str, Any]] = None
 
 
 class PaymentReconcileRunBody(BaseModel):
@@ -1047,6 +1058,8 @@ def _ensure_db():
                 level TEXT NOT NULL DEFAULT 'basic',
                 status TEXT NOT NULL DEFAULT 'active',
                 description TEXT NOT NULL DEFAULT '',
+                backtest_daily_limit INTEGER NOT NULL DEFAULT 10,
+                max_backtest_days INTEGER NOT NULL DEFAULT 365,
                 daily_points_refresh INTEGER NOT NULL DEFAULT 0,
                 backtest_point_multiplier INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
@@ -1056,6 +1069,10 @@ def _ensure_db():
         )
 
         plan_columns = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
+        if 'backtest_daily_limit' not in plan_columns:
+            conn.execute("ALTER TABLE plans ADD COLUMN backtest_daily_limit INTEGER NOT NULL DEFAULT 10")
+        if 'max_backtest_days' not in plan_columns:
+            conn.execute("ALTER TABLE plans ADD COLUMN max_backtest_days INTEGER NOT NULL DEFAULT 365")
         if 'daily_points_refresh' not in plan_columns:
             conn.execute("ALTER TABLE plans ADD COLUMN daily_points_refresh INTEGER NOT NULL DEFAULT 0")
         if 'backtest_point_multiplier' not in plan_columns:
@@ -1537,13 +1554,13 @@ def _ensure_db():
 
         # seed 套餐
         default_plans = [
-            ('test_pay_001', '测试版', 0.99, 1, 'basic', 'active', '每日最多回测10次\n最长回测时间跨度1年', 50, 1),
-            ('vip_month', 'VIP 月付', 69.0, 30, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 180, 1),
-            ('vip_year', 'VIP 年付', 568.0, 365, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 180, 1),
-            ('svip_month', 'SVIP 月付', 128.0, 30, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 300, 1),
-            ('svip_year', 'SVIP 年付', 998.0, 365, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 300, 1),
+            ('test_pay_001', '测试版', 0.99, 1, 'basic', 'active', '每日最多回测10次\n最长回测时间跨度1年', 10, 365, 50, 1),
+            ('vip_month', 'VIP 月付', 69.0, 30, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 30, 365 * 5, 180, 1),
+            ('vip_year', 'VIP 年付', 568.0, 365, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 30, 365 * 5, 180, 1),
+            ('svip_month', 'SVIP 月付', 128.0, 30, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 100, -1, 300, 1),
+            ('svip_year', 'SVIP 年付', 998.0, 365, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 100, -1, 300, 1),
         ]
-        for code, name, price, duration_days, level, status, desc, daily_points_refresh, backtest_point_multiplier in default_plans:
+        for code, name, price, duration_days, level, status, desc, backtest_daily_limit, max_backtest_days, daily_points_refresh, backtest_point_multiplier in default_plans:
             exists = conn.execute(
                 'SELECT id, daily_points_refresh, backtest_point_multiplier FROM plans WHERE code = ? LIMIT 1',
                 (code,),
@@ -1558,6 +1575,8 @@ def _ensure_db():
                         level = ?,
                         status = ?,
                         description = ?,
+                        backtest_daily_limit = ?,
+                        max_backtest_days = ?,
                         daily_points_refresh = ?,
                         backtest_point_multiplier = ?,
                         updated_at = ?
@@ -1570,6 +1589,8 @@ def _ensure_db():
                         level,
                         status,
                         desc,
+                        int(backtest_daily_limit),
+                        int(max_backtest_days),
                         int(daily_points_refresh),
                         max(1, int(backtest_point_multiplier)),
                         now,
@@ -1581,9 +1602,10 @@ def _ensure_db():
                 '''
                 INSERT INTO plans (
                     id, code, name, price, duration_days, level, status, description,
+                    backtest_daily_limit, max_backtest_days,
                     daily_points_refresh, backtest_point_multiplier,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     uuid.uuid4().hex,
@@ -1594,6 +1616,8 @@ def _ensure_db():
                     level,
                     status,
                     desc,
+                    int(backtest_daily_limit),
+                    int(max_backtest_days),
                     int(daily_points_refresh),
                     max(1, int(backtest_point_multiplier)),
                     now,
@@ -3015,21 +3039,12 @@ def _build_policy_rights_tips(policy: dict[str, Any]) -> list[str]:
     p = policy or {}
     tips: list[str] = []
 
-    if bool(p.get('chat_enabled')):
-        tips.append(f"智能对话：{_human_limit(p.get('chat_monthly_limit'), '次/月')} · {_human_limit(p.get('chat_daily_limit'), '次/日')}")
-    else:
-        tips.append('智能对话：未开通')
-
-    if bool(p.get('backtest_enabled')):
-        tips.append(f"策略回测：{_human_limit(p.get('backtest_monthly_limit'), '次/月')} · {_human_limit(p.get('backtest_daily_limit'), '次/日')}")
-    else:
-        tips.append('策略回测：未开通')
-
-    tips.append(f"单次回测股票上限：{_human_limit(p.get('max_backtest_stocks'), '只')}")
+    tips.append(f"每日回测次数：{_human_limit(p.get('backtest_daily_limit'), '次/日')}")
     tips.append(f"回测时间跨度上限：{_human_limit(p.get('max_backtest_days'), '天')}")
-    tips.append(f"回测积分倍率：x{max(1, int(p.get('backtest_point_multiplier', 1) or 1))}")
-    tips.append(f"每日积分刷新：{_human_limit(p.get('daily_points_refresh'), '分/日')}")
-    tips.append('报告下载：已开通' if bool(p.get('report_download_enabled')) else '报告下载：未开通')
+
+    plan_name = str(p.get('planName') or '').strip()
+    if plan_name:
+        tips.insert(0, f"当前生效套餐：{plan_name}")
 
     return tips
 

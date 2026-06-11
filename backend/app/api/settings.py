@@ -605,7 +605,7 @@ _CONFIG_TABLES = {
         'id_col': 'code',
         'cols': [
             'id', 'code', 'name', 'price', 'duration_days', 'level',
-            'status', 'description', 'daily_points_refresh', 'backtest_point_multiplier',
+            'status', 'description', 'backtest_daily_limit', 'max_backtest_days',
         ],
     },
 }

@@ -66,8 +66,8 @@ export interface PlanItem {
   level: string;
   status: string;
   description: string;
-  dailyPointsRefresh?: number;
-  backtestPointMultiplier?: number;
+  backtestDailyLimit?: number;
+  maxBacktestDays?: number;
   updatedAt?: string;
 }
 
