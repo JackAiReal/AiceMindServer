@@ -114,6 +114,20 @@ def export_my_account_data(authorization: Optional[str] = Header(default=None)):
 
     return _ok(payload)
 
+
+@router.get('/account/entitlement/summary')
+def get_account_entitlement_summary(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    account_id = str(user.get('id') or '').strip()
+    if not account_id:
+        return _fail('账号不存在')
+
+    summary = get_billing_context(account_id)
+    entitlement = dict(summary.get('entitlement') or _load_user_entitlement(user) or {})
+    summary['accountId'] = account_id
+    summary['entitlement'] = entitlement
+    return _ok(summary)
+
 @router.get('/system/account/delete-request/list')
 def list_account_delete_requests(
     authorization: Optional[str] = Header(default=None),

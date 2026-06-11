@@ -230,8 +230,8 @@ def test_payment(body: PaymentTestPayBody, authorization: Optional[str] = Header
             request_payload: dict[str, Any] = {}
             biz_response: dict[str, Any] = {}
 
-            if provider == 'alipay':
-                try:
+            try:
+                if provider == 'alipay':
                     biz_response, qr_code, request_payload = _alipay_precreate(
                         settings,
                         out_trade_no=out_trade_no,
@@ -239,25 +239,22 @@ def test_payment(body: PaymentTestPayBody, authorization: Optional[str] = Header
                         subject=subject,
                         body='AiceMind 支付联调测试订单',
                     )
-                except Exception as e:
-                    conn.execute(
-                        "UPDATE payment_trades SET status = 'failed', updated_at = ? WHERE id = ?",
-                        (_now_str(), trade_id),
+                else:
+                    biz_response, qr_code, request_payload = _wechat_native_precreate(
+                        settings,
+                        out_trade_no=out_trade_no,
+                        amount=round(amount, 2),
+                        subject=subject,
+                        currency=str(body.currency or 'CNY').strip() or 'CNY',
                     )
-                    conn.commit()
-                    return _fail(f'支付宝预下单失败: {e}')
-            else:
-                request_payload = {
-                    'appid': settings['wechatAppId'],
-                    'mchid': settings['wechatMerchantId'],
-                    'description': subject,
-                    'out_trade_no': out_trade_no,
-                    'notify_url': settings.get('wechatNotifyUrl') or '',
-                    'amount': {
-                        'total': int(round(amount * 100)),
-                        'currency': str(body.currency or 'CNY').strip() or 'CNY',
-                    },
-                }
+            except Exception as e:
+                conn.execute(
+                    "UPDATE payment_trades SET status = 'failed', updated_at = ? WHERE id = ?",
+                    (_now_str(), trade_id),
+                )
+                conn.commit()
+                provider_label = '支付宝' if provider == 'alipay' else '微信支付'
+                return _fail(f'{provider_label}预下单失败: {e}')
 
             conn.execute(
                 'UPDATE payment_trades SET callback_payload = ?, updated_at = ? WHERE id = ?',
@@ -526,6 +523,76 @@ def payment_trade_detail(
                     ''',
                     (out_trade_no,),
                 ).fetchone()
+
+            # 微信支付测试/普通下单：在前端轮询详情时顺便主动查单，避免完全依赖异步回调
+            if trade_row and str(trade_row['provider'] or '').strip().lower() == 'wechat' and str(trade_row['status'] or '').strip().lower() not in {'paid', 'success'}:
+                try:
+                    settings = _get_payment_settings(mask_secret=False)
+                    query_result = _wechat_query_trade(settings, str(trade_row['out_trade_no'] or '').strip())
+                    trade_state = str(query_result.get('trade_state') or '').strip().upper()
+                    amount_info = query_result.get('amount') if isinstance(query_result.get('amount'), dict) else {}
+                    total_cents = amount_info.get('total')
+                    paid_amount = float(total_cents or 0) / 100.0
+                    if trade_state in {'SUCCESS', 'TRADE_SUCCESS', 'PAID'}:
+                        _apply_paid_trade(
+                            conn,
+                            trade_row,
+                            callback_payload=query_result,
+                            verified=True,
+                            gateway_trade_no=str(query_result.get('transaction_id') or ''),
+                            provider_status=trade_state,
+                        )
+                        conn.commit()
+                    elif trade_state in {'CLOSED', 'REVOKED', 'PAYERROR'}:
+                        conn.execute(
+                            'UPDATE payment_trades SET status = ?, callback_payload = ?, callback_verified = ?, callback_at = ?, gateway_trade_no = ?, updated_at = ? WHERE id = ?',
+                            (
+                                'failed',
+                                json.dumps(query_result, ensure_ascii=False),
+                                1,
+                                _now_str(),
+                                str(query_result.get('transaction_id') or ''),
+                                _now_str(),
+                                str(trade_row['id'] or ''),
+                            ),
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
+
+                # 重新读取最新状态，返回给前端轮询
+                if trade_id:
+                    trade_row = conn.execute(
+                        '''
+                        SELECT
+                            t.id, t.order_id, t.order_no, t.account_id, t.provider,
+                            t.out_trade_no, t.amount, t.currency, t.status,
+                            t.payer_id, t.gateway_trade_no, t.callback_verified,
+                            t.callback_at, t.paid_at, t.created_at,
+                            o.status AS order_status, o.paid_at AS order_paid_at, o.note AS order_note
+                        FROM payment_trades t
+                        LEFT JOIN orders o ON o.id = t.order_id
+                        WHERE t.id = ?
+                        LIMIT 1
+                        ''',
+                        (trade_id,),
+                    ).fetchone()
+                else:
+                    trade_row = conn.execute(
+                        '''
+                        SELECT
+                            t.id, t.order_id, t.order_no, t.account_id, t.provider,
+                            t.out_trade_no, t.amount, t.currency, t.status,
+                            t.payer_id, t.gateway_trade_no, t.callback_verified,
+                            t.callback_at, t.paid_at, t.created_at,
+                            o.status AS order_status, o.paid_at AS order_paid_at, o.note AS order_note
+                        FROM payment_trades t
+                        LEFT JOIN orders o ON o.id = t.order_id
+                        WHERE t.out_trade_no = ?
+                        LIMIT 1
+                        ''',
+                        (out_trade_no,),
+                    ).fetchone()
 
     if not trade_row:
         return _fail('交易不存在')

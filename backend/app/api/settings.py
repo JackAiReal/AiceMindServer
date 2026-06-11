@@ -7,6 +7,7 @@ from io import BytesIO
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import StreamingResponse
 from app.api.deps import *  # noqa: F401,F403
+from app.secret_sync_shared import encrypt_payload
 
 router = APIRouter()
 
@@ -41,6 +42,17 @@ class VersionCheckBody(BaseModel):
 _SECRET_STREAM_INFO = b'AiceMindSensitiveSecretStream'
 _SECRET_MAC_INFO = b'AiceMindSensitiveSecretMac'
 _SECRET_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$')
+
+
+def _decrypt_activation_response(encrypted_data: str) -> str:
+    start_index = int(len(encrypted_data) * 0.02)
+    end_index = int(len(encrypted_data) * 0.98)
+    reversed_part = encrypted_data[start_index:end_index][::-1]
+    decrypted_data = encrypted_data[:start_index] + reversed_part + encrypted_data[end_index:]
+    mid_index = len(decrypted_data) // 2
+    if len(decrypted_data) % 2 != 0:
+        decrypted_data = decrypted_data[:mid_index] + decrypted_data[mid_index + 1:]
+    return base64.b64decode(decrypted_data.encode('utf-8')).decode('utf-8')
 
 
 def _decode_secret_master_key_text(text: str) -> bytes:
@@ -1065,6 +1077,92 @@ def client_resolve_sensitive_secret(
             'updatedAt': str(row['updated_at'] or ''),
         }
     )
+
+
+@router.post('/client/sensitive-secrets/sync')
+def client_sync_sensitive_secrets(body: SensitiveSecretSyncBody):
+    machine_id = str(body.machineId or '').strip()
+    activation_secret = str(body.activationSecret or '').strip()
+    issued_at = int(body.issuedAt or 0)
+    requested_keys = []
+    for item in body.requestedKeys or []:
+        key = str(item or '').strip()
+        if not key:
+            continue
+        try:
+            requested_keys.append(_normalize_sensitive_secret_key(key))
+        except ValueError:
+            return _fail(f'非法敏感数据 key: {key}')
+
+    if not machine_id:
+        return _fail('缺少 machineId')
+    if not activation_secret:
+        return _fail('缺少 activationSecret')
+    now_ts = int(time.time())
+    if issued_at and abs(now_ts - issued_at) > 300:
+        return _fail('请求已过期')
+    if not requested_keys:
+        return _fail('requestedKeys 不能为空')
+
+    activation_base_url = str(os.getenv('AICEMIND_ACTIVATION_BASE_URL', '')).strip() or 'http://api.8188811.xyz'
+    activation_app_code = str(os.getenv('AICEMIND_ACTIVATION_APP_CODE', '')).strip() or 'AiceMind'
+
+    try:
+        verify_resp = requests.post(
+            f"{activation_base_url.rstrip('/')}/v1/active_code/use_code_encry",
+            json={
+                'code_type': activation_app_code,
+                'bind_id': machine_id,
+                'code': activation_secret,
+            },
+            timeout=12,
+        )
+        if verify_resp.status_code != 200:
+            return _fail('激活校验失败')
+        verify_json = json.loads(_decrypt_activation_response(verify_resp.text))
+        verify_data = verify_json.get('data') if isinstance(verify_json, dict) else None
+        if not isinstance(verify_data, dict) or not bool(verify_data.get('status')):
+            return _fail('激活状态无效')
+    except Exception as e:
+        return _fail(f'激活校验异常: {e}')
+
+    items: dict[str, str] = {}
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            for secret_key in requested_keys:
+                row = conn.execute(
+                    'SELECT * FROM sensitive_secrets WHERE secret_key = ? LIMIT 1',
+                    (secret_key,),
+                ).fetchone()
+                if not row or int(row['enabled'] or 0) != 1:
+                    continue
+                try:
+                    items[secret_key] = _secret_decrypt_value(str(row['secret_value'] or ''))
+                except Exception:
+                    continue
+                _touch_sensitive_secret_access(conn, str(row['id'] or ''))
+                _audit_log(
+                    conn,
+                    machine_id,
+                    'client.secret.sync',
+                    'sensitive_secrets',
+                    str(row['id'] or ''),
+                    {
+                        'key': secret_key,
+                        'machineId': machine_id,
+                    },
+                )
+            conn.commit()
+
+    payload = encrypt_payload({
+        'machineId': machine_id,
+        'issuedAt': now_ts,
+        'items': items,
+    })
+
+    return _ok({'payload': payload, 'count': len(items)})
 
 
 # ===== 原有接口 =====

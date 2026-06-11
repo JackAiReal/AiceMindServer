@@ -5,6 +5,7 @@ import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 
 import { requestClient } from '#/api/request';
+import { listAccountsApi, type AccountItem } from '#/api/system/commerce';
 
 import type { TableColumnsType } from 'ant-design-vue';
 import {
@@ -24,10 +25,10 @@ import {
   Tag as ATag,
 } from 'ant-design-vue';
 
-type MemberLevel = 'basic' | 'pro' | 'svip' | 'vip';
-type MemberStatus = 'active' | 'disabled' | 'expired';
+type MemberLevel = 'basic' | 'pro' | 'svip' | 'vip' | 'none';
+type MemberStatus = 'active' | 'disabled' | 'expired' | 'inactive';
 
-interface MemberUser {
+interface UserListRow {
   id: string;
   userNickname: string;
   userId: string;
@@ -38,17 +39,19 @@ interface MemberUser {
   expireTime: string;
   points: number;
   updatedAt: string;
+  roles: string[];
+  source: 'account';
 }
 
 const loading = ref(false);
-const users = ref<MemberUser[]>([]);
+const users = ref<UserListRow[]>([]);
 const formOpen = ref(false);
 const submitLoading = ref(false);
 const editingId = ref<string>('');
 
 const extendOpen = ref(false);
 const extendLoading = ref(false);
-const currentExtendUser = ref<MemberUser | null>(null);
+const currentExtendUser = ref<UserListRow | null>(null);
 const extendForm = reactive<{
   mode: 'days' | 'set';
   days: number;
@@ -61,7 +64,7 @@ const extendForm = reactive<{
 
 const ARadioGroup = ARadio.Group;
 
-const formState = reactive<Partial<MemberUser>>({
+const formState = reactive<Partial<UserListRow>>({
   userNickname: '',
   userId: '',
   email: '',
@@ -73,6 +76,7 @@ const formState = reactive<Partial<MemberUser>>({
 });
 
 const levelOptions = [
+  { label: '未开通', value: 'none' },
   { label: '基础版', value: 'basic' },
   { label: 'Pro', value: 'pro' },
   { label: 'VIP', value: 'vip' },
@@ -83,12 +87,14 @@ const statusOptions = [
   { label: '激活', value: 'active' },
   { label: '禁用', value: 'disabled' },
   { label: '过期', value: 'expired' },
+  { label: '未开通', value: 'inactive' },
 ];
 
-const columns: TableColumnsType<MemberUser> = [
+const columns: TableColumnsType<UserListRow> = [
   { title: '用户昵称', dataIndex: 'userNickname', key: 'userNickname' },
   { title: '用户ID', dataIndex: 'userId', key: 'userId' },
   { title: '邮箱', dataIndex: 'email', key: 'email' },
+  { title: '角色', key: 'roles' },
   { title: '会员等级', dataIndex: 'memberLevel', key: 'memberLevel' },
   { title: '会员状态', key: 'memberStatus' },
   { title: '开始时间', dataIndex: 'startTime', key: 'startTime' },
@@ -102,11 +108,42 @@ const currentExpireText = computed(
   () => currentExtendUser.value?.expireTime || '-',
 );
 
+const normalizeRowFromAccount = (row: AccountItem): UserListRow => {
+  const entitlement = (row.entitlement || {}) as Record<string, any>;
+  const rawLevel = String(entitlement.level || 'none').toLowerCase();
+  const rawStatus = String(entitlement.status || 'inactive').toLowerCase();
+
+  const memberLevel: MemberLevel = ['basic', 'pro', 'vip', 'svip'].includes(rawLevel)
+    ? (rawLevel as MemberLevel)
+    : 'none';
+
+  const memberStatus: MemberStatus = ['active', 'disabled', 'expired'].includes(rawStatus)
+    ? (rawStatus as MemberStatus)
+    : memberLevel === 'none'
+      ? 'inactive'
+      : 'inactive';
+
+  return {
+    id: row.id,
+    userNickname: row.realName || row.username || '-',
+    userId: row.username || '-',
+    email: row.email || '-',
+    memberLevel,
+    memberStatus,
+    startTime: String(entitlement.start_at || ''),
+    expireTime: String(entitlement.expire_at || ''),
+    points: Number(entitlement.points || 0),
+    updatedAt: row.updatedAt || row.createdAt || '',
+    roles: Array.isArray(row.roles) ? row.roles : [],
+    source: 'account',
+  };
+};
+
 const loadUsers = async () => {
   loading.value = true;
   try {
-    const data = await requestClient.get<MemberUser[]>('/system/member/list');
-    users.value = data || [];
+    const data = await listAccountsApi();
+    users.value = (data || []).map(normalizeRowFromAccount);
   } finally {
     loading.value = false;
   }
@@ -129,13 +166,13 @@ const onCreate = () => {
   formOpen.value = true;
 };
 
-const onEdit = (row: any) => {
+const onEdit = (row: UserListRow) => {
   editingId.value = row.id;
   formState.userNickname = row.userNickname;
   formState.userId = row.userId;
   formState.email = row.email;
-  formState.memberLevel = row.memberLevel;
-  formState.memberStatus = row.memberStatus;
+  formState.memberLevel = row.memberLevel === 'none' ? 'basic' : row.memberLevel;
+  formState.memberStatus = row.memberStatus === 'inactive' ? 'active' : row.memberStatus;
   formState.startTime = row.startTime;
   formState.expireTime = row.expireTime;
   formState.points = row.points;
@@ -155,12 +192,12 @@ const onSubmit = async () => {
         id: editingId.value,
         ...formState,
       });
-      message.success('用户已更新');
+      message.success('会员信息已更新');
     } else {
       await requestClient.post('/system/member/create', {
         ...formState,
       });
-      message.success('用户已新增');
+      message.success('会员信息已新增');
     }
 
     formOpen.value = false;
@@ -170,7 +207,7 @@ const onSubmit = async () => {
   }
 };
 
-const onToggleStatus = async (row: any) => {
+const onToggleStatus = async (row: UserListRow) => {
   const nextStatus: MemberStatus =
     row.memberStatus === 'active' ? 'disabled' : 'active';
   await requestClient.post('/system/member/toggle-status', {
@@ -181,7 +218,7 @@ const onToggleStatus = async (row: any) => {
   await loadUsers();
 };
 
-const onExtendExpire = (row: any) => {
+const onExtendExpire = (row: UserListRow) => {
   currentExtendUser.value = row;
   extendForm.mode = 'days';
   extendForm.days = 30;
@@ -228,9 +265,9 @@ const onConfirmExtend = async () => {
   }
 };
 
-const onDelete = (row: any) => {
+const onDelete = (row: UserListRow) => {
   Modal.confirm({
-    title: '确认删除该用户？',
+    title: '确认删除该会员记录？',
     content: `${row.userNickname} (${row.userId})`,
     okText: '删除',
     okType: 'danger',
@@ -243,6 +280,20 @@ const onDelete = (row: any) => {
   });
 };
 
+const memberStatusText = (status: MemberStatus) => {
+  if (status === 'active') return '激活';
+  if (status === 'disabled') return '禁用';
+  if (status === 'expired') return '过期';
+  return '未开通';
+};
+
+const memberStatusColor = (status: MemberStatus) => {
+  if (status === 'active') return 'green';
+  if (status === 'disabled') return 'orange';
+  if (status === 'expired') return 'red';
+  return 'default';
+};
+
 onMounted(() => {
   void loadUsers();
 });
@@ -251,8 +302,11 @@ onMounted(() => {
 <template>
   <div class="user-list-page">
     <div class="page-header">
-      <h2>用户列表</h2>
-      <AButton type="primary" @click="onCreate">新增用户</AButton>
+      <div>
+        <h2>用户列表</h2>
+        <p class="page-tip">这里展示的是已注册账号，同时兼容显示会员状态，避免出现“能登录但列表里找不到”的情况。</p>
+      </div>
+      <AButton type="primary" @click="onCreate">新增会员</AButton>
     </div>
 
     <ATable
@@ -263,29 +317,22 @@ onMounted(() => {
       :pagination="{ pageSize: 10 }"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'memberStatus'">
-          <ATag
-            :color="
-              record.memberStatus === 'active'
-                ? 'green'
-                : record.memberStatus === 'disabled'
-                  ? 'orange'
-                  : 'red'
-            "
-          >
-            {{
-              record.memberStatus === 'active'
-                ? '激活'
-                : record.memberStatus === 'disabled'
-                  ? '禁用'
-                  : '过期'
-            }}
+        <template v-if="column.key === 'roles'">
+          <ASpace wrap>
+            <ATag v-for="role in record.roles" :key="role">{{ role }}</ATag>
+            <span v-if="!record.roles?.length">-</span>
+          </ASpace>
+        </template>
+
+        <template v-else-if="column.key === 'memberStatus'">
+          <ATag :color="memberStatusColor(record.memberStatus)">
+            {{ memberStatusText(record.memberStatus) }}
           </ATag>
         </template>
 
         <template v-else-if="column.key === 'actions'">
           <ASpace>
-            <AButton size="small" @click="onEdit(record)">编辑</AButton>
+            <AButton size="small" @click="onEdit(record)">编辑会员</AButton>
             <AButton
               size="small"
               :type="record.memberStatus === 'active' ? 'default' : 'primary'"
@@ -296,7 +343,7 @@ onMounted(() => {
             <AButton size="small" @click="onExtendExpire(record)">
               延长过期时间
             </AButton>
-            <AButton danger size="small" @click="onDelete(record)">删除</AButton>
+            <AButton danger size="small" @click="onDelete(record)">删除会员</AButton>
           </ASpace>
         </template>
       </template>
@@ -304,7 +351,7 @@ onMounted(() => {
 
     <AModal
       v-model:open="formOpen"
-      :title="isEdit ? '编辑用户' : '新增用户'"
+      :title="isEdit ? '编辑会员信息' : '新增会员信息'"
       :confirm-loading="submitLoading"
       @ok="onSubmit"
     >
@@ -393,13 +440,20 @@ onMounted(() => {
 
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   margin-bottom: 16px;
+  gap: 16px;
 }
 
 .page-header h2 {
   margin: 0;
   font-size: 18px;
+}
+
+.page-tip {
+  margin: 6px 0 0;
+  color: #64748b;
+  font-size: 13px;
 }
 </style>

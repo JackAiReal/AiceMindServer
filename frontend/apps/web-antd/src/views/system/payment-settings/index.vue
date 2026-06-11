@@ -66,6 +66,8 @@ const formState = reactive<PaymentSettings>({
   paymentAlertWebhook: '',
 });
 
+const currentProviderLabel = computed(() => (testPayResult.value?.provider === 'wechat' ? '微信支付' : '支付宝'));
+
 const qrImageUrl = computed(() => {
   const code = testPayResult.value?.qrCode || '';
   if (!code) return '';
@@ -154,13 +156,13 @@ const onConfirmTestPay = async () => {
     testResultText.value = JSON.stringify(result || {}, null, 2);
     testModalOpen.value = false;
 
-    if (result?.provider === 'alipay' && result?.qrCode) {
+    if (result?.qrCode) {
       payModalOpen.value = true;
       await refreshTradeStatus();
       startTradePolling();
-      message.success('已生成真实支付宝二维码，请扫码支付 0.01 元');
+      message.success(`已生成真实${result?.provider === 'wechat' ? '微信支付' : '支付宝'}二维码，请扫码支付 0.01 元`);
     } else {
-      message.success(`已生成 ${testProvider.value} 测试订单`);
+      message.success(`已生成 ${testProvider.value === 'wechat' ? '微信支付' : '支付宝'} 测试订单`);
     }
   } finally {
     testing.value = false;
@@ -287,7 +289,7 @@ onBeforeUnmount(() => {
         </ASpace>
 
         <div class="hint">
-          点击“测试支付 0.01 元”后，系统会创建测试订单；支付宝会弹出可扫码的真实二维码，支付成功后订单会自动变为 paid。
+          点击“测试支付 0.01 元”后，系统会创建测试订单；支付宝 / 微信支付都会弹出可扫码的真实二维码，支付成功后订单状态会自动刷新为 paid。
         </div>
 
         <AInput.TextArea
@@ -309,14 +311,14 @@ onBeforeUnmount(() => {
       <ARadio.Group v-model:value="testProvider">
         <ASpace direction="vertical">
           <ARadio value="alipay">测试支付宝（0.01 元，真实扫码）</ARadio>
-          <ARadio value="wechat">测试微信支付（0.01 元）</ARadio>
+          <ARadio value="wechat">测试微信支付（0.01 元，真实扫码）</ARadio>
         </ASpace>
       </ARadio.Group>
     </AModal>
 
     <AModal
       v-model:open="payModalOpen"
-      title="支付宝测试支付二维码"
+      :title="`${currentProviderLabel}测试支付二维码`"
       width="560px"
       :footer="null"
       @cancel="onClosePayModal"
@@ -335,7 +337,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="pay-qr-wrap">
-          <img v-if="qrImageUrl" :src="qrImageUrl" alt="支付宝支付二维码" class="pay-qr-img" />
+          <img v-if="qrImageUrl" :src="qrImageUrl" :alt="`${currentProviderLabel}支付二维码`" class="pay-qr-img" />
           <div v-else class="pay-qr-empty">二维码生成中...</div>
         </div>
 

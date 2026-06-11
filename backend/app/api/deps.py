@@ -361,6 +361,13 @@ class SensitiveSecretResolveBody(BaseModel):
     key: str
 
 
+class SensitiveSecretSyncBody(BaseModel):
+    machineId: str
+    activationSecret: str
+    requestedKeys: list[str] = []
+    issuedAt: int = 0
+
+
 class LegalDocSaveBody(BaseModel):
     docType: str
     title: str
@@ -497,13 +504,13 @@ def _safe_json_loads(text: str) -> dict[str, Any]:
 
 def _extract_qr_from_trade_payload(payload_text: str) -> str:
     payload = _safe_json_loads(payload_text)
-    qr = str(payload.get('qrCode') or '').strip()
+    qr = str(payload.get('qrCode') or payload.get('code_url') or '').strip()
     if qr:
         return qr
 
     gateway = payload.get('gatewayResponse')
     if isinstance(gateway, dict):
-        qr = str(gateway.get('qr_code') or '').strip()
+        qr = str(gateway.get('qr_code') or gateway.get('code_url') or '').strip()
         if qr:
             return qr
 
@@ -512,7 +519,7 @@ def _extract_qr_from_trade_payload(payload_text: str) -> str:
         biz_content_raw = request.get('biz_content')
         if isinstance(biz_content_raw, str):
             biz_content = _safe_json_loads(biz_content_raw)
-            qr = str(biz_content.get('qr_code') or '').strip()
+            qr = str(biz_content.get('qr_code') or biz_content.get('code_url') or '').strip()
             if qr:
                 return qr
 
@@ -1530,9 +1537,11 @@ def _ensure_db():
 
         # seed 套餐
         default_plans = [
-            ('basic_month', '基础版月付', 99.0, 30, 'basic', 'active', '基础版 30 天', 50, 1),
-            ('pro_month', 'Pro 月付', 199.0, 30, 'pro', 'active', 'Pro 版 30 天', 120, 1),
-            ('svip_year', 'SVIP 年付', 1999.0, 365, 'svip', 'active', 'SVIP 版 365 天', 300, 1),
+            ('test_pay_001', '测试版', 0.99, 1, 'basic', 'active', '每日最多回测10次\n最长回测时间跨度1年', 50, 1),
+            ('vip_month', 'VIP 月付', 69.0, 30, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 180, 1),
+            ('vip_year', 'VIP 年付', 568.0, 365, 'vip', 'active', '每日最多回测30次\n最长回测时间跨度5年', 180, 1),
+            ('svip_month', 'SVIP 月付', 128.0, 30, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 300, 1),
+            ('svip_year', 'SVIP 年付', 998.0, 365, 'svip', 'active', '每日最多回测100次\n最长回测时间跨度不限', 300, 1),
         ]
         for code, name, price, duration_days, level, status, desc, daily_points_refresh, backtest_point_multiplier in default_plans:
             exists = conn.execute(
@@ -1543,12 +1552,29 @@ def _ensure_db():
                 conn.execute(
                     '''
                     UPDATE plans
-                    SET daily_points_refresh = CASE WHEN daily_points_refresh <= 0 THEN ? ELSE daily_points_refresh END,
-                        backtest_point_multiplier = CASE WHEN backtest_point_multiplier <= 0 THEN ? ELSE backtest_point_multiplier END,
-                        updated_at = updated_at
+                    SET name = ?,
+                        price = ?,
+                        duration_days = ?,
+                        level = ?,
+                        status = ?,
+                        description = ?,
+                        daily_points_refresh = ?,
+                        backtest_point_multiplier = ?,
+                        updated_at = ?
                     WHERE id = ?
                     ''',
-                    (int(daily_points_refresh), max(1, int(backtest_point_multiplier)), str(exists[0] or '')),
+                    (
+                        name,
+                        float(price),
+                        int(duration_days),
+                        level,
+                        status,
+                        desc,
+                        int(daily_points_refresh),
+                        max(1, int(backtest_point_multiplier)),
+                        now,
+                        str(exists[0] or ''),
+                    ),
                 )
                 continue
             conn.execute(
@@ -2085,17 +2111,10 @@ def _apply_plan_to_account(
         (account_id, plan_code),
     ).fetchone()
 
-    base_dt = paid_dt
-    if existing:
-        old_expire = _parse_dt(str(existing['expire_time'] or ''))
-        if old_expire and old_expire > base_dt:
-            base_dt = old_expire
-
-    new_expire_dt = base_dt + timedelta(days=duration_days)
+    # 续费从“本次支付时间”重新起算，而不是从上次到期时间顺延。
+    new_expire_dt = paid_dt + timedelta(days=duration_days)
     new_expire = new_expire_dt.strftime('%Y-%m-%d %H:%M:%S')
     start_time = paid_at_str
-    if existing and str(existing['start_time'] or '').strip():
-        start_time = str(existing['start_time'])
 
     now = _now_str()
     conn.execute(
@@ -2736,6 +2755,131 @@ def _alipay_precreate(
     return biz_response, qr_code, request_payload
 
 
+def _wechatpay_build_authorization(
+    method: str,
+    canonical_url: str,
+    body_text: str,
+    mchid: str,
+    serial_no: str,
+    private_key: str,
+) -> tuple[str, str, str]:
+    nonce_str = uuid.uuid4().hex
+    timestamp = str(int(time.time()))
+    sign_message = f"{method.upper()}\n{canonical_url}\n{timestamp}\n{nonce_str}\n{body_text}\n"
+    private_key_pem = _normalize_pem_key(private_key, 'private')
+    try:
+        signature = _openssl_sign_sha256_base64(sign_message, private_key_pem)
+    except Exception:
+        rsa_private_pem = _normalize_pem_key(private_key, 'rsa_private')
+        signature = _openssl_sign_sha256_base64(sign_message, rsa_private_pem)
+
+    auth = (
+        'WECHATPAY2-SHA256-RSA2048 '
+        f'mchid="{mchid}",'
+        f'nonce_str="{nonce_str}",'
+        f'timestamp="{timestamp}",'
+        f'serial_no="{serial_no}",'
+        f'signature="{signature}"'
+    )
+    return auth, nonce_str, timestamp
+
+
+def _wechat_native_precreate(
+    settings: dict[str, Any],
+    out_trade_no: str,
+    amount: float,
+    subject: str,
+    currency: str = 'CNY',
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    gateway = str(settings.get('wechatGateway') or 'https://api.mch.weixin.qq.com').strip().rstrip('/')
+    if not gateway:
+        gateway = 'https://api.mch.weixin.qq.com'
+
+    notify_url = str(settings.get('wechatNotifyUrl') or '').strip()
+    if not notify_url:
+        raise ValueError('微信支付异步回调地址不能为空')
+
+    request_payload: dict[str, Any] = {
+        'appid': str(settings.get('wechatAppId') or '').strip(),
+        'mchid': str(settings.get('wechatMerchantId') or '').strip(),
+        'description': str(subject or 'AiceMind 支付联调测试订单').strip() or 'AiceMind 支付联调测试订单',
+        'out_trade_no': str(out_trade_no or '').strip(),
+        'notify_url': notify_url,
+        'amount': {
+            'total': int(round(float(amount) * 100)),
+            'currency': str(currency or 'CNY').strip() or 'CNY',
+        },
+    }
+
+    body_text = json.dumps(request_payload, ensure_ascii=False, separators=(',', ':'))
+    canonical_url = '/v3/pay/transactions/native'
+    authorization, _, _ = _wechatpay_build_authorization(
+        'POST',
+        canonical_url,
+        body_text,
+        str(settings.get('wechatMerchantId') or '').strip(),
+        str(settings.get('wechatSerialNo') or '').strip(),
+        str(settings.get('wechatPrivateKey') or ''),
+    )
+
+    response = requests.post(
+        gateway + canonical_url,
+        data=body_text.encode('utf-8'),
+        headers={
+            'Accept': 'application/json',
+            'Authorization': authorization,
+            'Content-Type': 'application/json; charset=utf-8',
+            'User-Agent': 'AiceMindAdmin/1.0',
+        },
+        timeout=20,
+    )
+    response_data = response.json() if response.text else {}
+    if response.status_code >= 400:
+        message = ''
+        if isinstance(response_data, dict):
+            message = str(response_data.get('message') or response_data.get('code') or '').strip()
+        raise ValueError(message or f'微信预下单失败: HTTP {response.status_code}')
+
+    qr_code = str((response_data or {}).get('code_url') or '').strip()
+    if not qr_code:
+        raise ValueError('微信支付未返回二维码内容 code_url')
+
+    return response_data, qr_code, request_payload
+
+
+def _wechat_query_trade(settings: dict[str, Any], out_trade_no: str) -> dict[str, Any]:
+    gateway = str(settings.get('wechatGateway') or 'https://api.mch.weixin.qq.com').strip().rstrip('/')
+    if not gateway:
+        gateway = 'https://api.mch.weixin.qq.com'
+
+    mchid = str(settings.get('wechatMerchantId') or '').strip()
+    canonical_url = f'/v3/pay/transactions/out-trade-no/{out_trade_no}?mchid={mchid}'
+    authorization, _, _ = _wechatpay_build_authorization(
+        'GET',
+        canonical_url,
+        '',
+        mchid,
+        str(settings.get('wechatSerialNo') or '').strip(),
+        str(settings.get('wechatPrivateKey') or ''),
+    )
+    response = requests.get(
+        gateway + canonical_url,
+        headers={
+            'Accept': 'application/json',
+            'Authorization': authorization,
+            'User-Agent': 'AiceMindAdmin/1.0',
+        },
+        timeout=20,
+    )
+    response_data = response.json() if response.text else {}
+    if response.status_code >= 400:
+        message = ''
+        if isinstance(response_data, dict):
+            message = str(response_data.get('message') or response_data.get('code') or '').strip()
+        raise ValueError(message or f'微信查单失败: HTTP {response.status_code}')
+    return response_data if isinstance(response_data, dict) else {}
+
+
 def _verify_callback_signature(provider: str, payload: dict[str, Any], settings: dict[str, Any]) -> bool:
     provider_key = str(provider or '').strip().lower()
     if provider_key not in {'alipay', 'wechat'}:
@@ -3321,11 +3465,11 @@ def _record_inapp_notification(
 
 def _require_user(authorization: Optional[str]) -> dict[str, Any]:
     if not authorization or not authorization.lower().startswith('bearer '):
-        raise HTTPException(status_code=401, detail='Unauthorized')
+        raise HTTPException(status_code=401, detail='未登录，请先登录账号')
 
     token = authorization.split(' ', 1)[1].strip()
     if not token:
-        raise HTTPException(status_code=401, detail='Unauthorized')
+        raise HTTPException(status_code=401, detail='登录凭证无效，请重新登录')
 
     with _DB_LOCK:
         _ensure_db()
@@ -3333,12 +3477,12 @@ def _require_user(authorization: Optional[str]) -> dict[str, Any]:
             conn.row_factory = sqlite3.Row
             session_row = _query_active_session(conn, token)
             if not session_row:
-                raise HTTPException(status_code=401, detail='Unauthorized')
+                raise HTTPException(status_code=401, detail='登录已过期，请重新登录')
 
             account_id = str(session_row['account_id'] or '').strip()
             user = get_account_identity(account_id)
             if not user:
-                raise HTTPException(status_code=401, detail='Unauthorized')
+                raise HTTPException(status_code=401, detail='账号不存在或已被删除，请联系管理员')
 
     user['entitlement'] = _load_user_entitlement(user)
     _ADMIN_TOKENS[token] = user

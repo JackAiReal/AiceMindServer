@@ -38,21 +38,26 @@ def commerce_create_pay_order(body: CommerceCreatePayBody, authorization: Option
     provider = str(body.provider or '').strip().lower() or 'alipay'
     if provider not in ('alipay', 'wechat'):
         return _fail('仅支持 alipay 或 wechat')
-    if provider == 'wechat':
-        return _fail('当前版本仅支持支付宝扫码支付')
 
     plan_code = str(body.planCode or '').strip()
     if not plan_code:
         return _fail('缺少套餐编码')
 
     settings = _get_payment_settings(mask_secret=False)
-    if not settings.get('alipayEnabled'):
-        return _fail('支付宝支付尚未启用')
-
-    required = ['alipayAppId', 'alipayMerchantId', 'alipayAppPrivateKey', 'alipayPublicKey', 'alipayNotifyUrl']
-    missing = [key for key in required if not str(settings.get(key) or '').strip()]
-    if missing:
-        return _fail(f'支付宝配置不完整: {", ".join(missing)}')
+    if provider == 'alipay':
+        if not settings.get('alipayEnabled'):
+            return _fail('支付宝支付尚未启用')
+        required = ['alipayAppId', 'alipayMerchantId', 'alipayAppPrivateKey', 'alipayPublicKey', 'alipayNotifyUrl']
+        missing = [key for key in required if not str(settings.get(key) or '').strip()]
+        if missing:
+            return _fail(f'支付宝配置不完整: {", ".join(missing)}')
+    else:
+        if not settings.get('wechatEnabled'):
+            return _fail('微信支付尚未启用')
+        required = ['wechatAppId', 'wechatMerchantId', 'wechatApiV3Key', 'wechatPrivateKey', 'wechatSerialNo', 'wechatNotifyUrl']
+        missing = [key for key in required if not str(settings.get(key) or '').strip()]
+        if missing:
+            return _fail(f'微信支付配置不完整: {", ".join(missing)}')
 
     account_id = str(user.get('id') or '').strip()
     now_str = _now_str()
@@ -176,13 +181,21 @@ def commerce_create_pay_order(body: CommerceCreatePayBody, authorization: Option
             )
 
             try:
-                gateway_response, qr_code, request_payload = _alipay_precreate(
-                    settings,
-                    out_trade_no=out_trade_no,
-                    amount=round(amount, 2),
-                    subject=str(plan_row['name'] or plan_code),
-                    body=f"AiceMind 套餐升级 {plan_code}",
-                )
+                if provider == 'wechat':
+                    gateway_response, qr_code, request_payload = _wechat_native_precreate(
+                        settings,
+                        out_trade_no=out_trade_no,
+                        amount=round(amount, 2),
+                        subject=str(plan_row['name'] or plan_code),
+                    )
+                else:
+                    gateway_response, qr_code, request_payload = _alipay_precreate(
+                        settings,
+                        out_trade_no=out_trade_no,
+                        amount=round(amount, 2),
+                        subject=str(plan_row['name'] or plan_code),
+                        body=f"AiceMind 套餐升级 {plan_code}",
+                    )
             except Exception as e:
                 conn.execute(
                     "UPDATE payment_trades SET status = 'failed', updated_at = ? WHERE id = ?",
@@ -194,10 +207,11 @@ def commerce_create_pay_order(body: CommerceCreatePayBody, authorization: Option
                     'commerce.order.create_pay_failed',
                     'payment_trade',
                     trade_id,
-                    {'orderNo': order_no, 'planCode': plan_code, 'reason': str(e)},
+                    {'orderNo': order_no, 'planCode': plan_code, 'provider': provider, 'reason': str(e)},
                 )
                 conn.commit()
-                return _fail(f'支付宝预下单失败: {e}')
+                provider_label = '微信' if provider == 'wechat' else '支付宝'
+                return _fail(f'{provider_label}预下单失败: {e}')
 
             conn.execute(
                 'UPDATE payment_trades SET callback_payload = ?, updated_at = ? WHERE id = ?',

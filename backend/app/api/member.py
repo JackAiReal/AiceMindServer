@@ -5,6 +5,53 @@ from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
 
+
+def _resolve_member_row_by_any_id(conn: sqlite3.Connection, raw_id: str):
+    target_id = str(raw_id or '').strip()
+    if not target_id:
+        return None, None
+
+    conn.row_factory = sqlite3.Row
+
+    member_row = conn.execute(
+        '''
+        SELECT id, user_nickname, user_id, email, member_level, member_status,
+               start_time, expire_time, points, updated_at, created_at
+        FROM member_users
+        WHERE id = ?
+        LIMIT 1
+        ''',
+        (target_id,),
+    ).fetchone()
+    if member_row:
+        return member_row, None
+
+    account_row = conn.execute(
+        '''
+        SELECT id, username, real_name, email, roles
+        FROM user_accounts
+        WHERE id = ?
+        LIMIT 1
+        ''',
+        (target_id,),
+    ).fetchone()
+    if not account_row:
+        return None, None
+
+    username = str(account_row['username'] or '').strip()
+    email = str(account_row['email'] or '').strip().lower()
+    member_row = conn.execute(
+        '''
+        SELECT id, user_nickname, user_id, email, member_level, member_status,
+               start_time, expire_time, points, updated_at, created_at
+        FROM member_users
+        WHERE user_id = ? OR lower(email) = ?
+        LIMIT 1
+        ''',
+        (username, email),
+    ).fetchone()
+    return member_row, account_row
+
 @router.post('/system/member/renewal/remind/run')
 def run_member_renewal_reminder(body: RenewalReminderRunBody, authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
@@ -574,16 +621,28 @@ def update_member(body: MemberUpdateBody, authorization: Optional[str] = Header(
     with _DB_LOCK:
         _ensure_db()
         with _db_connect() as conn:
-            exists = conn.execute(
-                'SELECT 1 FROM member_users WHERE id = ?',
-                (row_id,),
-            ).fetchone()
-            if not exists:
-                return _fail('用户不存在')
+            member_row, account_row = _resolve_member_row_by_any_id(conn, row_id)
+            actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+
+            if not actual_member_id:
+                if not account_row:
+                    return _fail('用户不存在')
+                _sync_member_for_account(
+                    conn,
+                    account_row=account_row,
+                    level=(body.memberLevel or 'basic').strip() or 'basic',
+                    status=(body.memberStatus or 'active').strip() or 'active',
+                    start_time=start_time,
+                    expire_time=expire_time,
+                )
+                member_row, _ = _resolve_member_row_by_any_id(conn, row_id)
+                actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+                if not actual_member_id:
+                    return _fail('用户不存在')
 
             duplicate = conn.execute(
                 'SELECT 1 FROM member_users WHERE user_id = ? AND id != ?',
-                (user_id, row_id),
+                (user_id, actual_member_id),
             ).fetchone()
             if duplicate:
                 return _fail('用户ID已存在')
@@ -612,7 +671,7 @@ def update_member(body: MemberUpdateBody, authorization: Optional[str] = Header(
                     expire_time,
                     int(body.points or 0),
                     _now_str(),
-                    row_id,
+                    actual_member_id,
                 ),
             )
             _audit_log(
@@ -620,7 +679,7 @@ def update_member(body: MemberUpdateBody, authorization: Optional[str] = Header(
                 str(user.get('id') or ''),
                 'member.update',
                 'member_user',
-                row_id,
+                actual_member_id,
                 {'userId': user_id, 'email': (body.email or '').strip()},
             )
             conn.commit()
@@ -639,20 +698,40 @@ def toggle_member_status(body: ToggleStatusBody, authorization: Optional[str] = 
     with _DB_LOCK:
         _ensure_db()
         with _db_connect() as conn:
-            exists = conn.execute('SELECT 1 FROM member_users WHERE id = ?', (row_id,)).fetchone()
-            if not exists:
-                return _fail('用户不存在')
-            conn.execute(
-                'UPDATE member_users SET member_status = ?, updated_at = ? WHERE id = ?',
-                (status, _now_str(), row_id),
-            )
+            member_row, account_row = _resolve_member_row_by_any_id(conn, row_id)
+            actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+
+            if not actual_member_id:
+                if not account_row:
+                    return _fail('用户不存在')
+                now = _now_str()
+                expire_time = _default_expire_str() if status == 'active' else now
+                start_time = now
+                _sync_member_for_account(
+                    conn,
+                    account_row=account_row,
+                    level='basic',
+                    status=status,
+                    start_time=start_time,
+                    expire_time=expire_time,
+                )
+                member_row, _ = _resolve_member_row_by_any_id(conn, row_id)
+                actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+                if not actual_member_id:
+                    return _fail('用户不存在')
+            else:
+                conn.execute(
+                    'UPDATE member_users SET member_status = ?, updated_at = ? WHERE id = ?',
+                    (status, _now_str(), actual_member_id),
+                )
+
             _audit_log(
                 conn,
                 str(user.get('id') or ''),
                 'member.toggle_status',
                 'member_user',
-                row_id,
-                {'status': status},
+                actual_member_id,
+                {'status': status, 'sourceId': row_id},
             )
             conn.commit()
     return _ok(True)
@@ -670,12 +749,24 @@ def extend_member_expire(body: ExtendExpireBody, authorization: Optional[str] = 
         _ensure_db()
         with _db_connect() as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                'SELECT expire_time FROM member_users WHERE id = ?',
-                (row_id,),
-            ).fetchone()
-            if not row:
-                return _fail('用户不存在')
+            member_row, account_row = _resolve_member_row_by_any_id(conn, row_id)
+            actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+
+            if not actual_member_id:
+                if not account_row:
+                    return _fail('用户不存在')
+                _sync_member_for_account(
+                    conn,
+                    account_row=account_row,
+                    level='basic',
+                    status='active',
+                    start_time=_now_str(),
+                    expire_time=_default_expire_str(),
+                )
+                member_row, _ = _resolve_member_row_by_any_id(conn, row_id)
+                actual_member_id = str(member_row['id'] or '').strip() if member_row else ''
+                if not actual_member_id:
+                    return _fail('用户不存在')
 
             now = datetime.now()
             if body.expireTime and body.expireTime.strip():
@@ -687,7 +778,7 @@ def extend_member_expire(body: ExtendExpireBody, authorization: Optional[str] = 
                 days = int(body.days or 0)
                 if days <= 0:
                     return _fail('延长天数必须大于 0')
-                current_expire = _parse_dt(row['expire_time']) or now
+                current_expire = _parse_dt(member_row['expire_time']) or now
                 base = current_expire if current_expire > now else now
                 new_expire_dt = base + timedelta(days=days)
 
@@ -702,15 +793,15 @@ def extend_member_expire(body: ExtendExpireBody, authorization: Optional[str] = 
                     updated_at = ?
                 WHERE id = ?
                 ''',
-                (new_expire, status, _now_str(), row_id),
+                (new_expire, status, _now_str(), actual_member_id),
             )
             _audit_log(
                 conn,
                 str(user.get('id') or ''),
                 'member.extend_expire',
                 'member_user',
-                row_id,
-                {'expireTime': new_expire, 'status': status},
+                actual_member_id,
+                {'expireTime': new_expire, 'status': status, 'sourceId': row_id},
             )
             conn.commit()
     return _ok({'expireTime': new_expire})
@@ -728,42 +819,44 @@ def delete_member(member_id: str, authorization: Optional[str] = Header(default=
         _ensure_db()
         with _db_connect() as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                'SELECT user_id, email FROM member_users WHERE id = ?',
-                (row_id,),
-            ).fetchone()
-            if not row:
+            member_row, account_row = _resolve_member_row_by_any_id(conn, row_id)
+            if not member_row:
                 return _fail('用户不存在')
 
-            user_id = str(row['user_id'] or '').strip()
-            email = str(row['email'] or '').strip().lower()
+            actual_member_id = str(member_row['id'] or '').strip()
+            user_id = str(member_row['user_id'] or '').strip()
+            email = str(member_row['email'] or '').strip().lower()
 
-            conn.execute('DELETE FROM member_users WHERE id = ?', (row_id,))
+            conn.execute('DELETE FROM member_users WHERE id = ?', (actual_member_id,))
 
-            account_row = None
+            if not account_row:
+                if user_id and email:
+                    account_row = conn.execute(
+                        'SELECT id FROM user_accounts WHERE lower(username) = ? OR lower(email) = ? LIMIT 1',
+                        (user_id.lower(), email),
+                    ).fetchone()
+                elif user_id:
+                    account_row = conn.execute(
+                        'SELECT id FROM user_accounts WHERE lower(username) = ? LIMIT 1',
+                        (user_id.lower(),),
+                    ).fetchone()
+                elif email:
+                    account_row = conn.execute(
+                        'SELECT id FROM user_accounts WHERE lower(email) = ? LIMIT 1',
+                        (email,),
+                    ).fetchone()
+
             if user_id and email:
-                account_row = conn.execute(
-                    'SELECT id FROM user_accounts WHERE lower(username) = ? OR lower(email) = ? LIMIT 1',
-                    (user_id.lower(), email),
-                ).fetchone()
                 conn.execute(
                     'DELETE FROM user_accounts WHERE lower(username) = ? OR lower(email) = ?',
                     (user_id.lower(), email),
                 )
             elif user_id:
-                account_row = conn.execute(
-                    'SELECT id FROM user_accounts WHERE lower(username) = ? LIMIT 1',
-                    (user_id.lower(),),
-                ).fetchone()
                 conn.execute(
                     'DELETE FROM user_accounts WHERE lower(username) = ?',
                     (user_id.lower(),),
                 )
             elif email:
-                account_row = conn.execute(
-                    'SELECT id FROM user_accounts WHERE lower(email) = ? LIMIT 1',
-                    (email,),
-                ).fetchone()
                 conn.execute(
                     'DELETE FROM user_accounts WHERE lower(email) = ?',
                     (email,),
@@ -780,8 +873,8 @@ def delete_member(member_id: str, authorization: Optional[str] = Header(default=
                 str(user.get('id') or ''),
                 'member.delete',
                 'member_user',
-                row_id,
-                {'userId': user_id, 'email': email},
+                actual_member_id,
+                {'userId': user_id, 'email': email, 'sourceId': row_id},
             )
             conn.commit()
 
