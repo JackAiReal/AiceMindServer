@@ -341,18 +341,25 @@ def get_entitlement_for_account(account_id: str) -> dict[str, Any]:
     return entitlement
 
 
-def get_entitlement_policy(level: str | None) -> dict[str, Any]:
+def get_entitlement_policy(level: str | None, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
     _ensure_billing_tables()
 
     normalized = _normalize_level(level)
     base = dict(_DEFAULT_POLICY_MAP.get(normalized) or _DEFAULT_POLICY_MAP['basic'])
 
-    with _db_connect() as conn:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _db_connect()
+
+    try:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             'SELECT policy_json FROM entitlement_policies WHERE level = ? LIMIT 1',
             (normalized,),
         ).fetchone()
+    finally:
+        if owns_conn and conn is not None:
+            conn.close()
 
     if row:
         try:
@@ -366,16 +373,25 @@ def get_entitlement_policy(level: str | None) -> dict[str, Any]:
     return base
 
 
-def upsert_entitlement_policy(level: str, policy: dict[str, Any]) -> dict[str, Any]:
+def upsert_entitlement_policy(
+    level: str,
+    policy: dict[str, Any],
+    conn: Optional[sqlite3.Connection] = None,
+    auto_commit: bool = True,
+) -> dict[str, Any]:
     _ensure_billing_tables()
     normalized = _normalize_level(level)
 
-    current = get_entitlement_policy(normalized)
+    owns_conn = conn is None
+    if owns_conn:
+        conn = _db_connect()
+
+    current = get_entitlement_policy(normalized, conn=conn)
     current.update(policy or {})
     current['level'] = normalized
 
     now = _now_str()
-    with _db_connect() as conn:
+    try:
         conn.execute(
             '''
             INSERT INTO entitlement_policies(level, policy_json, created_at, updated_at)
@@ -386,7 +402,11 @@ def upsert_entitlement_policy(level: str, policy: dict[str, Any]) -> dict[str, A
             ''',
             (normalized, json.dumps(current, ensure_ascii=False), now, now),
         )
-        conn.commit()
+        if auto_commit:
+            conn.commit()
+    finally:
+        if owns_conn and conn is not None:
+            conn.close()
 
     return current
 
@@ -606,8 +626,8 @@ def _get_active_plan_override(account_id: str) -> dict[str, Any]:
             WHERE s.account_id = ?
               AND s.status = 'active'
               AND p.status = 'active'
-              AND datetime(COALESCE(s.expire_time, '')) > datetime(?)
-            ORDER BY datetime(s.expire_time) DESC, datetime(s.updated_at) DESC
+              AND COALESCE(s.expire_time, '') > ?
+            ORDER BY s.expire_time DESC, s.updated_at DESC
             LIMIT 1
             ''',
             (account, now_str),

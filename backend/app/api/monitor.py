@@ -66,30 +66,56 @@ def monitor_request_metrics(
         _ensure_db()
         with _db_connect() as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                '''
-                SELECT method, path, status_code, success, latency_ms, created_at
-                FROM request_metrics
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ORDER BY datetime(created_at) DESC
-                LIMIT ?
-                ''',
-                (f'-{int(minutes)} minutes', int(limit)),
-            ).fetchall()
+            if _DB_RUNTIME.get('engine') == 'mysql':
+                rows = conn.execute(
+                    '''
+                    SELECT method, path, status_code, success, latency_ms, created_at
+                    FROM request_metrics
+                    WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    ''',
+                    (int(minutes), int(limit)),
+                ).fetchall()
 
-            summary_row = conn.execute(
-                '''
-                SELECT
-                    COUNT(1) AS total,
-                    SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
-                    AVG(latency_ms) AS avg_latency,
-                    MAX(latency_ms) AS max_latency,
-                    SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS server_error_count
-                FROM request_metrics
-                WHERE datetime(created_at) >= datetime('now', ?)
-                ''',
-                (f'-{int(minutes)} minutes',),
-            ).fetchone()
+                summary_row = conn.execute(
+                    '''
+                    SELECT
+                        COUNT(1) AS total,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
+                        AVG(latency_ms) AS avg_latency,
+                        MAX(latency_ms) AS max_latency,
+                        SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS server_error_count
+                    FROM request_metrics
+                    WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+                    ''',
+                    (int(minutes),),
+                ).fetchone()
+            else:
+                rows = conn.execute(
+                    '''
+                    SELECT method, path, status_code, success, latency_ms, created_at
+                    FROM request_metrics
+                    WHERE datetime(created_at) >= datetime('now', ?)
+                    ORDER BY datetime(created_at) DESC
+                    LIMIT ?
+                    ''',
+                    (f'-{int(minutes)} minutes', int(limit)),
+                ).fetchall()
+
+                summary_row = conn.execute(
+                    '''
+                    SELECT
+                        COUNT(1) AS total,
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
+                        AVG(latency_ms) AS avg_latency,
+                        MAX(latency_ms) AS max_latency,
+                        SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) AS server_error_count
+                    FROM request_metrics
+                    WHERE datetime(created_at) >= datetime('now', ?)
+                    ''',
+                    (f'-{int(minutes)} minutes',),
+                ).fetchone()
 
     total = int((summary_row['total'] if summary_row else 0) or 0)
     success_count = int((summary_row['success_count'] if summary_row else 0) or 0)
