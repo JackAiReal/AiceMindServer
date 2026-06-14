@@ -1086,6 +1086,64 @@ def commerce_payment_status(
             if not trade_row:
                 return _fail('交易不存在')
 
+            trade_status_now = str(trade_row['status'] or '').strip().lower()
+            order_status_now = str(trade_row['order_status'] or '').strip().lower()
+            provider_now = str(trade_row['provider'] or '').strip().lower()
+            if provider_now == 'wechat' and trade_status_now != 'paid' and order_status_now != 'paid':
+                try:
+                    settings = _get_payment_settings(mask_secret=False)
+                    query_result = _wechat_query_trade(settings, str(trade_row['out_trade_no'] or '').strip())
+                    gateway_state = str(query_result.get('trade_state') or '').strip().upper()
+                    if gateway_state == 'SUCCESS':
+                        _apply_paid_trade(
+                            conn,
+                            trade_row,
+                            callback_payload={
+                                'source': 'status_query_repair',
+                                'provider': 'wechat',
+                                'out_trade_no': str(trade_row['out_trade_no'] or ''),
+                                'queryResponse': query_result,
+                            },
+                            verified=True,
+                            gateway_trade_no=str(query_result.get('transaction_id') or ''),
+                            provider_status='SUCCESS',
+                        )
+                        conn.commit()
+                        if trade_id:
+                            trade_row = conn.execute(
+                                '''
+                                SELECT t.id, t.order_id, t.order_no, t.account_id, t.provider,
+                                       t.out_trade_no, t.amount, t.currency, t.status,
+                                       t.gateway_trade_no, t.callback_verified, t.callback_at, t.paid_at, t.created_at,
+                                       o.status AS order_status, o.paid_at AS order_paid_at, o.expire_at AS order_expire_at,
+                                       p.name AS plan_name, p.code AS plan_code
+                                FROM payment_trades t
+                                LEFT JOIN orders o ON o.id = t.order_id
+                                LEFT JOIN plans p ON p.code = o.plan_code
+                                WHERE t.id = ? AND t.account_id = ?
+                                LIMIT 1
+                                ''',
+                                (trade_id, account_id),
+                            ).fetchone()
+                        else:
+                            trade_row = conn.execute(
+                                '''
+                                SELECT t.id, t.order_id, t.order_no, t.account_id, t.provider,
+                                       t.out_trade_no, t.amount, t.currency, t.status,
+                                       t.gateway_trade_no, t.callback_verified, t.callback_at, t.paid_at, t.created_at,
+                                       o.status AS order_status, o.paid_at AS order_paid_at, o.expire_at AS order_expire_at,
+                                       p.name AS plan_name, p.code AS plan_code
+                                FROM payment_trades t
+                                LEFT JOIN orders o ON o.id = t.order_id
+                                LEFT JOIN plans p ON p.code = o.plan_code
+                                WHERE t.out_trade_no = ? AND t.account_id = ?
+                                LIMIT 1
+                                ''',
+                                (out_trade_no, account_id),
+                            ).fetchone()
+                except Exception:
+                    logger.exception('wechat status query repair failed: out_trade_no=%s', str(trade_row['out_trade_no'] or ''))
+
             event_row = conn.execute(
                 '''
                 SELECT status, verified, processed, processed_message, created_at
