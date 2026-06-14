@@ -311,12 +311,20 @@ async def _handle_payment_callback(provider: str, request: Request):
     if not payload:
         payload = dict(request.query_params)
 
+    settings = _get_payment_settings(mask_secret=False)
+    if provider_key == 'wechat' and isinstance(payload.get('resource'), (dict, str)):
+        payload = _wechat_decrypt_notification_resource(payload.get('resource'), str(settings.get('wechatApiV3Key') or '')) or payload
+
     out_trade_no, amount, status_text, gateway_trade_no, event_key = _extract_payment_notify_payload(provider_key, payload)
     if not out_trade_no:
         return _fail('缺少 out_trade_no')
 
-    settings = _get_payment_settings(mask_secret=False)
-    verified = _verify_callback_signature(provider_key, payload, settings)
+    verified = _verify_callback_signature(
+        provider_key,
+        payload,
+        settings,
+        wechat_resource_verified=bool(payload.get('_wechat_resource_verified')),
+    )
 
     with _DB_LOCK:
         _ensure_db()

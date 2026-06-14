@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.api.deps import *  # noqa: F401,F403
 from app.api.member import _handle_payment_callback
@@ -996,11 +996,17 @@ async def _safe_payment_callback(provider: str, request: Request):
         if provider_key == 'alipay':
             return PlainTextResponse('success', status_code=200)
 
+        if provider_key == 'wechat':
+            return JSONResponse({'code': 'FAIL', 'message': 'callback accepted with error'}, status_code=200)
+
         return _ok({'accepted': True, 'provider': provider_key, 'error': str(e)}, message='callback accepted with error')
 
     # 支付宝要求 success 纯文本应答，避免网关重试风暴
     if provider_key == 'alipay':
         return PlainTextResponse('success', status_code=200)
+
+    if provider_key == 'wechat':
+        return JSONResponse({'code': 'SUCCESS', 'message': '成功'}, status_code=200)
 
     return result
 

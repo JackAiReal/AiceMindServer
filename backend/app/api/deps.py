@@ -2904,7 +2904,12 @@ def _wechat_query_trade(settings: dict[str, Any], out_trade_no: str) -> dict[str
     return response_data if isinstance(response_data, dict) else {}
 
 
-def _verify_callback_signature(provider: str, payload: dict[str, Any], settings: dict[str, Any]) -> bool:
+def _verify_callback_signature(
+    provider: str,
+    payload: dict[str, Any],
+    settings: dict[str, Any],
+    wechat_resource_verified: bool = False,
+) -> bool:
     provider_key = str(provider or '').strip().lower()
     if provider_key not in {'alipay', 'wechat'}:
         return False
@@ -2912,16 +2917,116 @@ def _verify_callback_signature(provider: str, payload: dict[str, Any], settings:
     if provider_key == 'alipay':
         return _alipay_verify_payload(payload, str(settings.get('alipayPublicKey') or ''))
 
-    provided = str(payload.get('sign') or payload.get('signature') or '').strip().lower()
-    if not provided:
-        return False
+    return bool(wechat_resource_verified)
 
-    secret = str(settings.get('wechatApiV3Key') or '')
-    if not secret:
-        return False
 
-    expected = _sign_payload(payload, secret)
-    return hmac.compare_digest(expected, provided)
+def _wechat_decrypt_notification_resource(resource: Any, api_v3_key: str) -> dict[str, Any]:
+    resource_data = resource
+    if isinstance(resource_data, str):
+        try:
+            resource_data = json.loads(resource_data)
+        except Exception:
+            return {}
+
+    if not isinstance(resource_data, dict):
+        return {}
+
+    ciphertext = str(resource_data.get('ciphertext') or '').strip()
+    nonce = str(resource_data.get('nonce') or '').strip()
+    associated_data = str(resource_data.get('associated_data') or resource_data.get('associatedData') or '').strip()
+    algorithm = str(resource_data.get('algorithm') or '').strip().upper()
+    secret = str(api_v3_key or '').strip()
+
+    if not ciphertext or not nonce or not secret:
+        return {}
+    if algorithm and algorithm != 'AEAD_AES_256_GCM':
+        return {}
+    if len(secret.encode('utf-8')) != 32:
+        return {}
+
+    node_script = r"""
+const crypto = require('node:crypto');
+const chunks = [];
+process.stdin.on('data', (chunk) => chunks.push(chunk));
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    const key = Buffer.from(String(input.key || ''), 'utf8');
+    const ciphertext = Buffer.from(String(input.ciphertext || ''), 'base64');
+    const nonce = Buffer.from(String(input.nonce || ''), 'utf8');
+    const aad = String(input.associatedData || '') ? Buffer.from(String(input.associatedData), 'utf8') : null;
+    if (key.length !== 32) {
+      throw new Error('invalid api v3 key length');
+    }
+    if (ciphertext.length < 17) {
+      throw new Error('ciphertext too short');
+    }
+    const authTag = ciphertext.subarray(ciphertext.length - 16);
+    const encrypted = ciphertext.subarray(0, ciphertext.length - 16);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
+    if (aad) {
+      decipher.setAAD(aad);
+    }
+    decipher.setAuthTag(authTag);
+    const plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+    process.stdout.write(JSON.stringify({ ok: true, plaintext }));
+  } catch (error) {
+    process.stdout.write(JSON.stringify({ ok: false, error: String(error && error.message ? error.message : error) }));
+  }
+});
+process.stdin.resume();
+""".strip()
+
+    try:
+        result = subprocess.run(
+            ['node', '-e', node_script],
+            input=json.dumps(
+                {
+                    'key': secret,
+                    'ciphertext': ciphertext,
+                    'nonce': nonce,
+                    'associatedData': associated_data,
+                },
+                ensure_ascii=False,
+            ).encode('utf-8'),
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return {}
+
+    output_text = (result.stdout or b'').decode('utf-8', errors='ignore').strip()
+    if not output_text:
+        return {}
+
+    try:
+        output_data = json.loads(output_text)
+    except Exception:
+        return {}
+
+    if not isinstance(output_data, dict) or not output_data.get('ok'):
+        return {}
+
+    plaintext = str(output_data.get('plaintext') or '').strip()
+    if not plaintext:
+        return {}
+
+    try:
+        decrypted = json.loads(plaintext)
+    except Exception:
+        return {}
+
+    if not isinstance(decrypted, dict):
+        return {}
+
+    merged: dict[str, Any] = dict(resource_data)
+    merged.update(decrypted)
+    amount = decrypted.get('amount')
+    if isinstance(amount, dict):
+        merged['amount_total'] = amount.get('total')
+    merged['_wechat_resource_verified'] = True
+    return merged
 
 
 def _build_payment_request_payload(provider: str, trade_row: sqlite3.Row, settings: dict[str, Any]) -> dict[str, Any]:
@@ -2980,7 +3085,7 @@ def _extract_payment_notify_payload(provider: str, payload: dict[str, Any]) -> t
     amount = float(amount_cents or 0) / 100.0
     status = str(payload.get('trade_state') or payload.get('status') or '').strip().upper()
     gateway_trade_no = str(payload.get('transaction_id') or payload.get('trade_no') or '')
-    event_key = str(payload.get('event_id') or gateway_trade_no or f'{out_trade_no}:{status}:{amount}')
+    event_key = str(payload.get('id') or payload.get('event_id') or gateway_trade_no or f'{out_trade_no}:{status}:{amount}')
     return out_trade_no, amount, status, gateway_trade_no, event_key
 
 
