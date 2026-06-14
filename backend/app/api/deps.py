@@ -2134,10 +2134,12 @@ def _apply_plan_to_account(
         (account_id, plan_code),
     ).fetchone()
 
-    # 续费从“本次支付时间”重新起算，而不是从上次到期时间顺延。
-    new_expire_dt = paid_dt + timedelta(days=duration_days)
+    existing_expire_dt = _parse_dt(str(existing['expire_time'] or '')) if existing else None
+    # 有效期内续费从当前到期时间顺延；已过期/无订阅时从本次支付时间起算。
+    base_dt = existing_expire_dt if existing_expire_dt and existing_expire_dt > paid_dt else paid_dt
+    new_expire_dt = base_dt + timedelta(days=duration_days)
     new_expire = new_expire_dt.strftime('%Y-%m-%d %H:%M:%S')
-    start_time = paid_at_str
+    start_time = str(existing['start_time'] or paid_at_str) if existing else paid_at_str
 
     now = _now_str()
     conn.execute(
@@ -3414,18 +3416,27 @@ def _close_timeout_orders(
     reason: str = 'order timeout auto close',
 ) -> list[dict[str, Any]]:
     now = _now_str()
-    params: list[Any] = [now]
-    where = ["o.status = 'created'", "o.expire_at != ''", 'datetime(o.expire_at) <= datetime(?)']
-    if str(account_id or '').strip():
-        where.append('o.account_id = ?')
-        params.append(str(account_id or '').strip())
+    if _DB_RUNTIME.get('engine') == 'mysql':
+        params: list[Any] = [now]
+        where = ["o.status = 'created'", "o.expire_at != ''", 'o.expire_at <= %s']
+        if str(account_id or '').strip():
+            where.append('o.account_id = %s')
+            params.append(str(account_id or '').strip())
+        order_expr = 'o.created_at ASC'
+    else:
+        params = [now]
+        where = ["o.status = 'created'", "o.expire_at != ''", 'datetime(o.expire_at) <= datetime(?)']
+        if str(account_id or '').strip():
+            where.append('o.account_id = ?')
+            params.append(str(account_id or '').strip())
+        order_expr = 'datetime(o.created_at) ASC'
 
     rows = conn.execute(
         f'''
         SELECT o.id, o.order_no, o.account_id, o.expire_at, o.note
         FROM orders o
         WHERE {' AND '.join(where)}
-        ORDER BY datetime(o.created_at) ASC
+        ORDER BY {order_expr}
         LIMIT 500
         ''',
         tuple(params),

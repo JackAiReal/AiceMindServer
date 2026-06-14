@@ -128,8 +128,6 @@ def _normalize_level(level: str | None) -> str:
 
 
 def _ensure_billing_tables() -> None:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     with _db_connect() as conn:
         conn.execute(
             '''

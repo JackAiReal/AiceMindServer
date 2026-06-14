@@ -5,10 +5,31 @@ from app.api.deps import *  # noqa: F401,F403
 
 router = APIRouter()
 
+def _resolve_billing_account_id(user: dict[str, Any]) -> str:
+    account_id = str(user.get('id') or '').strip()
+    username = str(user.get('username') or '').strip()
+    email = str(user.get('email') or '').strip().lower()
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                '''
+                SELECT id
+                FROM user_accounts
+                WHERE id = ? OR username = ? OR lower(email) = ?
+                LIMIT 1
+                ''',
+                (account_id, username, email),
+            ).fetchone()
+    return str(row['id'] or '').strip() if row else ''
+
+
 @router.post('/billing/feature/check')
 def billing_feature_check(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
-    account_id = str(user.get('id') or '').strip()
+    account_id = _resolve_billing_account_id(user)
     if not account_id:
         return _fail('账号不存在')
 
@@ -25,7 +46,7 @@ def billing_feature_check(body: BillingFeatureConsumeBody, authorization: Option
 @router.post('/billing/feature/consume')
 def billing_feature_consume(body: BillingFeatureConsumeBody, authorization: Optional[str] = Header(default=None)):
     user = _require_user(authorization)
-    account_id = str(user.get('id') or '').strip()
+    account_id = _resolve_billing_account_id(user)
     if not account_id:
         return _fail('账号不存在')
 
