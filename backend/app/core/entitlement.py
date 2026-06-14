@@ -7,13 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from app.core.db_runtime import connect_sqlite, resolve_sqlite_path
-
-_DB_PATH = resolve_sqlite_path(Path(__file__).resolve().parents[2] / 'data' / 'admin_console.db')
+from app.core.db_runtime import connect_mysql
 
 
 def _db_connect():
-    return connect_sqlite(_DB_PATH)
+    return connect_mysql()
 _NO_EXPIRE_TIME = '2099-12-31 23:59:59'
 
 _DEFAULT_POLICY_MAP: dict[str, dict[str, Any]] = {

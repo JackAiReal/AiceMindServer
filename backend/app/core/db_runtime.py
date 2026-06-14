@@ -16,58 +16,27 @@ def get_db_url() -> str:
     return str(os.getenv('AICEMIND_DB_URL') or '').strip()
 
 
-def is_sqlite_url(db_url: str) -> bool:
-    return db_url.startswith('sqlite:///')
-
-
 def is_mysql_url(db_url: str) -> bool:
     return db_url.startswith('mysql://') or db_url.startswith('mysql+pymysql://')
 
 
-def resolve_sqlite_path(default_path: Path) -> Path:
+def require_mysql_db_url() -> str:
     db_url = get_db_url()
-    if is_sqlite_url(db_url):
-        raw = db_url.replace('sqlite:///', '', 1)
-        return Path(raw).expanduser().resolve()
-    return default_path.expanduser().resolve()
-
-
-def describe_runtime(default_path: Path) -> dict[str, str]:
-    db_url = get_db_url()
-    sqlite_path = resolve_sqlite_path(default_path)
     if not db_url:
-        return {
-            'engine': 'sqlite',
-            'mode': 'default',
-            'dbUrl': '',
-            'sqlitePath': str(sqlite_path),
-            'warning': '',
-        }
+        raise RuntimeError('AICEMIND_DB_URL is required and must be mysql:// or mysql+pymysql://')
+    if not is_mysql_url(db_url):
+        raise RuntimeError('AICEMIND_DB_URL must be mysql:// or mysql+pymysql://; sqlite fallback has been removed')
+    return db_url
 
-    if is_sqlite_url(db_url):
-        return {
-            'engine': 'sqlite',
-            'mode': 'db_url',
-            'dbUrl': db_url,
-            'sqlitePath': str(sqlite_path),
-            'warning': '',
-        }
 
-    if is_mysql_url(db_url):
-        return {
-            'engine': 'mysql',
-            'mode': 'db_url',
-            'dbUrl': db_url,
-            'sqlitePath': str(sqlite_path),
-            'warning': '',
-        }
-
+def describe_runtime(default_path: Path | None = None) -> dict[str, str]:
+    db_url = require_mysql_db_url()
     return {
-        'engine': 'external',
-        'mode': 'unsupported_runtime_fallback',
+        'engine': 'mysql',
+        'mode': 'db_url',
         'dbUrl': db_url,
-        'sqlitePath': str(sqlite_path),
-        'warning': 'AICEMIND_DB_URL 运行时目前仅支持 sqlite:/// 或 mysql://',
+        'sqlitePath': '',
+        'warning': '',
     }
 
 
@@ -303,21 +272,5 @@ def _handle_mysql_special(conn, sql: str, params: tuple):
     return None
 
 
-def connect_sqlite(path: Path):
-    db_url = get_db_url()
-    if is_mysql_url(db_url):
-        return MySQLConnection(db_url)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=20)
-    for pragma in (
-        'PRAGMA journal_mode=WAL',
-        'PRAGMA synchronous=NORMAL',
-        'PRAGMA foreign_keys=ON',
-        'PRAGMA busy_timeout=15000',
-    ):
-        try:
-            conn.execute(pragma)
-        except Exception:
-            pass
-    return conn
+def connect_mysql():
+    return MySQLConnection(require_mysql_db_url())

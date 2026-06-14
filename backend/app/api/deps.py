@@ -25,7 +25,7 @@ import requests
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from app.core.db_runtime import connect_sqlite, describe_runtime, resolve_sqlite_path
+from app.core.db_runtime import connect_mysql, describe_runtime
 from app.core.entitlement import (
     consume_feature_quota,
     get_account_identity,
@@ -43,12 +43,11 @@ from app.core.entitlement import (
 _DB_LOCK = threading.Lock()
 # 运行期默认跳过重复初始化，避免与主后端共享 SQLite 时出现锁竞争
 _DB_READY = True
-_DB_PATH = resolve_sqlite_path(Path(__file__).resolve().parents[2] / 'data' / 'admin_console.db')
-_DB_RUNTIME = describe_runtime(_DB_PATH)
+_DB_RUNTIME = describe_runtime()
 
 
 def _db_connect():
-    return connect_sqlite(_DB_PATH)
+    return connect_mysql()
 
 
 def _execute_with_retry(
@@ -80,7 +79,7 @@ _DEFAULT_VERIFY_BODY_TEMPLATE = (
     '{{app_name}} 团队'
 )
 _SECRET_MASTER_KEY_ENV_NAMES = ('AICEMIND_SECRET_MASTER_KEY', 'AICEMIND_SECRET_KEY')
-_SECRET_MASTER_KEY_FILE = resolve_sqlite_path(Path(__file__).resolve().parents[2] / 'data' / '.secret-master.key')
+_SECRET_MASTER_KEY_FILE = Path(__file__).resolve().parents[2] / 'data' / '.secret-master.key'
 _SECRET_CIPHER_PREFIX = 'enc:v1:'
 _SECRET_ACCESS_LEVELS = {'admin', 'authenticated', 'entitled'}
 
@@ -3477,8 +3476,33 @@ def _find_recent_unpaid_trade_by_plan(
     window_minutes: int = _ORDER_IDEMPOTENCY_WINDOW_MINUTES,
 ) -> Optional[sqlite3.Row]:
     minutes = max(1, int(window_minutes or _ORDER_IDEMPOTENCY_WINDOW_MINUTES))
-    return conn.execute(
+    cutoff_dt = datetime.now() - timedelta(minutes=minutes)
+    cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    if _DB_RUNTIME.get('engine') == 'mysql':
+        sql = '''
+        SELECT
+            t.id, t.order_id, t.order_no, t.out_trade_no, t.provider,
+            t.amount, t.currency, t.status AS trade_status,
+            t.callback_payload, t.created_at AS trade_created_at,
+            o.status AS order_status, o.expire_at,
+            p.name AS plan_name, p.code AS plan_code
+        FROM payment_trades t
+        JOIN orders o ON o.id = t.order_id
+        LEFT JOIN plans p ON p.code = o.plan_code
+        WHERE t.account_id = %s
+          AND o.plan_code = %s
+          AND t.provider = %s
+          AND o.status = 'created'
+          AND t.status IN ('created', 'pending')
+          AND t.created_at >= %s
+          AND (o.expire_at = '' OR o.expire_at > NOW())
+        ORDER BY t.created_at DESC
+        LIMIT 1
         '''
+        params = (account_id, plan_code, provider, cutoff_str)
+    else:
+        sql = '''
         SELECT
             t.id, t.order_id, t.order_no, t.out_trade_no, t.provider,
             t.amount, t.currency, t.status AS trade_status,
@@ -3497,9 +3521,10 @@ def _find_recent_unpaid_trade_by_plan(
           AND (o.expire_at = '' OR datetime(o.expire_at) > datetime('now'))
         ORDER BY datetime(t.created_at) DESC
         LIMIT 1
-        ''',
-        (account_id, plan_code, provider, f'-{minutes} minutes'),
-    ).fetchone()
+        '''
+        params = (account_id, plan_code, provider, f'-{minutes} minutes')
+
+    return conn.execute(sql, params).fetchone()
 
 
 def _alipay_trade_query(settings: dict[str, Any], out_trade_no: str) -> tuple[dict[str, Any], dict[str, Any]]:

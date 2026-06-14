@@ -3,7 +3,7 @@ AiceMind Admin Backend — 独立部署的管理后台 API 服务
 
 职责：会员管理、订阅、支付、订单、安全策略、审计日志等
 端口：5010 (默认)
-数据库：data/admin_console.db (SQLite，与主后端共享同一数据文件)
+数据库：AICEMIND_DB_URL 指定的 MySQL 数据库
 """
 
 from contextlib import asynccontextmanager
@@ -19,11 +19,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / '.env', override=F
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Starting AiceMind Admin Backend...")
-    # 确保 DB 目录存在
-    from app.core.db_runtime import resolve_sqlite_path
-    db_path = resolve_sqlite_path(Path(__file__).resolve().parents[1] / 'data' / 'admin_console.db')
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"📁 Admin DB path: {db_path}")
+    from app.core.db_runtime import describe_runtime
+    runtime = describe_runtime()
+    print(f"📁 Admin DB runtime: {runtime.get('engine')} {runtime.get('dbUrl')}")
     yield
     print("🔄 Admin Backend shutting down...")
 
