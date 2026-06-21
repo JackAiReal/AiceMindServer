@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / '.env', override=False)
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / '.env.local', override=True)
 
 
 @asynccontextmanager

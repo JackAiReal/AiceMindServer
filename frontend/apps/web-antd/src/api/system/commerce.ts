@@ -538,6 +538,36 @@ export const listErrorEventsApi = (params?: { limit?: number }) =>
 export const testObservabilityAlertApi = () =>
   requestClient.post('/system/monitor/error/test');
 
+export interface VersionPolicyItem {
+  id: string;
+  appCode: string;
+  target: string;
+  platform: string;
+  channel: string;
+  latestVersion: string;
+  minSupportedVersion: string;
+  enforceExactMatch: boolean;
+  forceUpgrade: boolean;
+  autoUpgradeWithoutConfirm: boolean;
+  title: string;
+  details: string;
+  downloadUrl: string;
+  releaseNotes: string;
+  publishedAt: string;
+  updaterUrl: string;
+  updaterSignature: string;
+  updaterPubkey: string;
+  updatedBy: string;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export const listVersionPoliciesApi = () =>
+  requestClient.get<VersionPolicyItem[]>('/system/version-policy/list');
+
+export const saveVersionPolicyApi = (payload: Partial<VersionPolicyItem>) =>
+  requestClient.post('/system/version-policy/save', payload);
+
 export interface SensitiveSecretItem {
   id: string;
   key: string;

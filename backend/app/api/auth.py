@@ -376,6 +376,57 @@ def send_email_code(body: SendEmailCodeBody):
 
     return _ok(True, message='验证码已发送，请注意查收邮箱')
 
+
+@router.post('/auth/send-phone-code')
+def send_phone_code(body: SendPhoneCodeBody):
+    phone = str(body.phone or '').strip()
+    purpose = str(body.purpose or 'login').strip() or 'login'
+    if not re.fullmatch(r'1\d{10}', phone):
+        return _fail('请输入有效手机号')
+    if purpose not in {'login', 'register'}:
+        return _fail('不支持的验证码用途')
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            exists = conn.execute(
+                'SELECT 1 FROM user_accounts WHERE phone = ? LIMIT 1',
+                (phone,),
+            ).fetchone()
+            if purpose == 'register' and exists:
+                return _fail('该手机号已注册，请直接登录')
+            if purpose == 'login' and not exists:
+                return _fail('该手机号未注册，请先注册')
+
+    settings = _get_sms_settings(mask_secret=False)
+    err = _validate_sms_settings(settings)
+    if err:
+        return _fail(err)
+
+    code = ''.join(str(random.randint(0, 9)) for _ in range(6))
+    expire_minutes = 10
+    expire_at = (datetime.now() + timedelta(minutes=expire_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.execute(
+                '''
+                INSERT INTO sms_codes (
+                    id, phone, purpose, code, expires_at, used, updated_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                ''',
+                (uuid.uuid4().hex, phone, purpose, code, expire_at, _now_str(), _now_str()),
+            )
+            conn.commit()
+
+    try:
+        _send_sms_code(settings, phone, code, purpose=purpose)
+    except Exception as e:
+        return _fail(f'验证码发送失败: {e}')
+
+    return _ok(True, message='验证码短信已发送，请注意查收')
+
 @router.post('/auth/send-reset-code')
 def send_reset_password_code(body: ForgotPasswordSendCodeBody):
     email = (body.email or '').strip().lower()
@@ -504,6 +555,182 @@ def reset_password_by_email(body: ForgotPasswordResetBody):
             _ADMIN_TOKENS.pop(token, None)
 
     return _ok(True, message='密码已重置，请重新登录')
+
+class PhoneLoginBody(BaseModel):
+    phone: str
+    code: str
+
+
+@router.post('/auth/phone-login')
+def login_by_phone_code(body: PhoneLoginBody):
+    phone = str(body.phone or '').strip()
+    code = str(getattr(body, 'code', '') or '').strip()
+    if not re.fullmatch(r'1\d{10}', phone):
+        return _fail('请输入有效手机号')
+    if not re.fullmatch(r'\d{6}', code):
+        return _fail('验证码格式错误')
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            user_row = conn.execute(
+                'SELECT id, username, real_name, email, phone, roles, home_path FROM user_accounts WHERE phone = ? LIMIT 1',
+                (phone,),
+            ).fetchone()
+            if not user_row:
+                return _fail('账号不存在，请先注册')
+            code_row = conn.execute(
+                '''
+                SELECT id, code, expires_at, used
+                FROM sms_codes
+                WHERE phone = ? AND purpose = 'login'
+                ORDER BY datetime(created_at) DESC
+                LIMIT 1
+                ''',
+                (phone,),
+            ).fetchone()
+            if not code_row:
+                return _fail('请先发送验证码')
+            if int(code_row['used'] or 0) == 1:
+                return _fail('验证码已失效，请重新发送')
+            if str(code_row['code'] or '') != code:
+                return _fail('验证码错误')
+            expire_at = _parse_dt(str(code_row['expires_at'] or ''))
+            if expire_at is None or expire_at <= datetime.now():
+                return _fail('验证码已过期，请重新发送')
+
+            now = _now_str()
+            conn.execute('UPDATE sms_codes SET used = 1, updated_at = ? WHERE id = ?', (now, str(code_row['id'] or '')))
+            token = _create_admin_session(conn, str(user_row['id'] or ''))
+            _audit_log(conn, str(user_row['id'] or ''), 'auth.phone_login_success', 'account', str(user_row['id'] or ''), {'phone': phone})
+            conn.commit()
+
+    user_snapshot = {
+        'id': user_row['id'],
+        'username': user_row['username'],
+        'realName': user_row['real_name'],
+        'email': user_row['email'],
+        'roles': _normalize_roles(user_row['roles']),
+        'homePath': user_row['home_path'] or '/workspace',
+    }
+    user_snapshot['entitlement'] = _load_user_entitlement(user_snapshot)
+    _ADMIN_TOKENS[token] = user_snapshot
+    return _ok({'accessToken': token, 'entitlement': user_snapshot['entitlement']}, message='登录成功')
+
+
+class RegisterByPhoneBody(BaseModel):
+    phone: str
+    code: str
+    nickname: str
+    password: str = ''
+    confirmPassword: str = ''
+    inviteCode: Optional[str] = None
+
+
+@router.post('/auth/register-phone')
+def register_by_phone(body: RegisterByPhoneBody):
+    phone = str(body.phone or '').strip()
+    code = str(body.code or '').strip()
+    nickname = str(body.nickname or '').strip()
+    password = str(body.password or '').strip()
+    confirm_password = str(body.confirmPassword or '').strip()
+
+    if not re.fullmatch(r'1\d{10}', phone):
+        return _fail('请输入有效手机号')
+    if not re.fullmatch(r'\d{6}', code):
+        return _fail('验证码格式错误')
+    if not nickname:
+        return _fail('请填写昵称')
+    if password and password != confirm_password:
+        return _fail('两次输入的密码不一致')
+
+    final_password = password or f'AiceMind@{code}'
+    policy = _get_security_policy()
+    pwd_err = _validate_password_with_policy(final_password, policy)
+    if pwd_err:
+        return _fail(pwd_err)
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            exists = conn.execute('SELECT 1 FROM user_accounts WHERE phone = ? LIMIT 1', (phone,)).fetchone()
+            if exists:
+                return _fail('该手机号已注册')
+            code_row = conn.execute(
+                '''
+                SELECT id, code, expires_at, used
+                FROM sms_codes
+                WHERE phone = ? AND purpose = 'register'
+                ORDER BY datetime(created_at) DESC
+                LIMIT 1
+                ''',
+                (phone,),
+            ).fetchone()
+            if not code_row:
+                return _fail('请先发送验证码')
+            if int(code_row['used'] or 0) == 1:
+                return _fail('验证码已失效，请重新发送')
+            if str(code_row['code'] or '') != code:
+                return _fail('验证码错误')
+            expire_at = _parse_dt(str(code_row['expires_at'] or ''))
+            if expire_at is None or expire_at <= datetime.now():
+                return _fail('验证码已过期，请重新发送')
+
+            username = f'user_{phone[-6:]}'
+            base_username = username
+            i = 1
+            while conn.execute('SELECT 1 FROM user_accounts WHERE username = ? LIMIT 1', (username,)).fetchone():
+                i += 1
+                username = f'{base_username}_{i}'
+            now = _now_str()
+            user_id = uuid.uuid4().hex
+            pseudo_email = f'{phone}@phone.local'
+            conn.execute(
+                '''
+                INSERT INTO user_accounts (
+                    id, username, password, real_name, email, phone,
+                    roles, home_path, updated_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    user_id,
+                    username,
+                    _hash_password(final_password),
+                    nickname,
+                    pseudo_email,
+                    phone,
+                    json.dumps(['user'], ensure_ascii=False),
+                    '/workspace',
+                    now,
+                    now,
+                ),
+            )
+            _ensure_member_for_user(conn, username, pseudo_email, nickname)
+            conn.execute('UPDATE sms_codes SET used = 1, updated_at = ? WHERE id = ?', (now, str(code_row['id'] or '')))
+            conn.commit()
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            token = _create_admin_session(conn, user_id)
+            _audit_log(conn, user_id, 'auth.register_phone', 'account', user_id, {'phone': phone, 'username': username})
+            conn.commit()
+
+    user_snapshot = {
+        'id': user_id,
+        'username': username,
+        'realName': nickname,
+        'roles': ['user'],
+        'email': pseudo_email,
+        'homePath': '/workspace',
+    }
+    user_snapshot['entitlement'] = _load_user_entitlement(user_snapshot)
+    _ADMIN_TOKENS[token] = user_snapshot
+    return _ok({'accessToken': token, 'username': username, 'entitlement': user_snapshot['entitlement']}, message='注册成功')
+
 
 @router.post('/auth/register')
 def register_by_email(body: RegisterByEmailBody):

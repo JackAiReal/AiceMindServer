@@ -194,12 +194,35 @@ class EmailSettingsBody(BaseModel):
     verifyBodyTemplate: str = _DEFAULT_VERIFY_BODY_TEMPLATE
 
 
+class SmsSettingsBody(BaseModel):
+    apiHost: str = 'https://smssh.253.com'
+    account: str = ''
+    password: str = ''
+    signature: str = ''
+    loginTemplateId: str = ''
+    registerTemplateId: str = ''
+    passwordTemplateId: str = ''
+    report: bool = True
+    callbackUrl: str = ''
+    senderUid: str = ''
+    timeoutSeconds: int = 20
+
+
+class SendTestSmsBody(SmsSettingsBody):
+    phone: str
+
+
 class SendTestEmailBody(EmailSettingsBody):
     testEmail: str
 
 
 class SendEmailCodeBody(BaseModel):
     email: str
+
+
+class SendPhoneCodeBody(BaseModel):
+    phone: str
+    purpose: str = 'login'
 
 
 class ForgotPasswordSendCodeBody(BaseModel):
@@ -903,6 +926,7 @@ def _ensure_db():
                 password TEXT NOT NULL,
                 real_name TEXT NOT NULL,
                 email TEXT NOT NULL UNIQUE,
+                phone TEXT NOT NULL DEFAULT '',
                 roles TEXT NOT NULL,
                 home_path TEXT NOT NULL,
                 totp_enabled INTEGER NOT NULL DEFAULT 0,
@@ -914,10 +938,32 @@ def _ensure_db():
         )
 
         user_account_columns = {row[1] for row in conn.execute("PRAGMA table_info(user_accounts)").fetchall()}
+        missing_user_account_columns = []
+        if 'phone' not in user_account_columns:
+            missing_user_account_columns.append(("phone", "TEXT NOT NULL DEFAULT ''"))
         if 'totp_enabled' not in user_account_columns:
-            conn.execute("ALTER TABLE user_accounts ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+            missing_user_account_columns.append(("totp_enabled", "INTEGER NOT NULL DEFAULT 0"))
         if 'totp_secret' not in user_account_columns:
-            conn.execute("ALTER TABLE user_accounts ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''")
+            missing_user_account_columns.append(("totp_secret", "TEXT NOT NULL DEFAULT ''"))
+
+        if missing_user_account_columns:
+            if _DB_RUNTIME.get('engine') == 'mysql' and hasattr(conn, '_conn'):
+                cursor = conn._conn.cursor()
+                try:
+                    mysql_type_map = {
+                        "TEXT NOT NULL DEFAULT ''": "VARCHAR(255) NOT NULL DEFAULT ''",
+                        "INTEGER NOT NULL DEFAULT 0": "INT NOT NULL DEFAULT 0",
+                    }
+                    for col_name, col_type in missing_user_account_columns:
+                        cursor.execute(
+                            f"ALTER TABLE user_accounts ADD COLUMN {col_name} {mysql_type_map.get(col_type, col_type)}"
+                        )
+                finally:
+                    cursor.close()
+            else:
+                for col_name, col_type in missing_user_account_columns:
+                    conn.execute(f"ALTER TABLE user_accounts ADD COLUMN {col_name} {col_type}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_accounts_phone ON user_accounts(phone) WHERE phone <> ''")
 
         conn.execute(
             '''
@@ -1265,6 +1311,69 @@ def _ensure_db():
 
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS client_version_policies (
+                id TEXT PRIMARY KEY,
+                app_code TEXT NOT NULL,
+                target TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'all',
+                channel TEXT NOT NULL DEFAULT 'stable',
+                latest_version TEXT NOT NULL DEFAULT '',
+                min_supported_version TEXT NOT NULL DEFAULT '',
+                enforce_exact_match INTEGER NOT NULL DEFAULT 1,
+                force_upgrade INTEGER NOT NULL DEFAULT 1,
+                auto_upgrade_without_confirm INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                download_url TEXT NOT NULL DEFAULT '',
+                release_notes TEXT NOT NULL DEFAULT '',
+                published_at TEXT NOT NULL DEFAULT '',
+                updater_url TEXT NOT NULL DEFAULT '',
+                updater_signature TEXT NOT NULL DEFAULT '',
+                updater_pubkey TEXT NOT NULL DEFAULT '',
+                updated_by TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_client_version_policies_unique '
+            'ON client_version_policies(app_code, target, platform, channel)'
+        )
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_client_version_policies_updated '
+            'ON client_version_policies(updated_at DESC)'
+        )
+
+        version_policy_columns = {row[1] for row in conn.execute("PRAGMA table_info(client_version_policies)").fetchall()}
+        if version_policy_columns:
+            missing_version_policy_columns = []
+            if 'updater_url' not in version_policy_columns:
+                missing_version_policy_columns.append(("updater_url", "TEXT NOT NULL DEFAULT ''"))
+            if 'updater_signature' not in version_policy_columns:
+                missing_version_policy_columns.append(("updater_signature", "TEXT NOT NULL DEFAULT ''"))
+            if 'updater_pubkey' not in version_policy_columns:
+                missing_version_policy_columns.append(("updater_pubkey", "TEXT NOT NULL DEFAULT ''"))
+
+            if missing_version_policy_columns:
+                if _DB_RUNTIME.get('engine') == 'mysql' and hasattr(conn, '_conn'):
+                    cursor = conn._conn.cursor()
+                    try:
+                        mysql_type_map = {
+                            "TEXT NOT NULL DEFAULT ''": "TEXT NOT NULL",
+                        }
+                        for col_name, col_type in missing_version_policy_columns:
+                            cursor.execute(
+                                f"ALTER TABLE client_version_policies ADD COLUMN {col_name} {mysql_type_map.get(col_type, col_type)}"
+                            )
+                    finally:
+                        cursor.close()
+                else:
+                    for col_name, col_type in missing_version_policy_columns:
+                        conn.execute(f"ALTER TABLE client_version_policies ADD COLUMN {col_name} {col_type}")
+
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS payment_trades (
                 id TEXT PRIMARY KEY,
                 order_id TEXT NOT NULL,
@@ -1424,6 +1533,55 @@ def _ensure_db():
         conn.execute(
             'CREATE INDEX IF NOT EXISTS idx_email_codes_email_purpose ON email_codes(email, purpose, created_at DESC)'
         )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sms_settings (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                api_host TEXT NOT NULL DEFAULT 'https://smssh.253.com',
+                account TEXT NOT NULL DEFAULT '',
+                password TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '',
+                login_template_id TEXT NOT NULL DEFAULT '',
+                register_template_id TEXT NOT NULL DEFAULT '',
+                password_template_id TEXT NOT NULL DEFAULT '',
+                report INTEGER NOT NULL DEFAULT 1,
+                callback_url TEXT NOT NULL DEFAULT '',
+                sender_uid TEXT NOT NULL DEFAULT '',
+                timeout_seconds INTEGER NOT NULL DEFAULT 20,
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS sms_codes (
+                id TEXT PRIMARY KEY,
+                phone TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                code TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sms_codes_phone_purpose ON sms_codes(phone, purpose, created_at DESC)')
+
+        user_account_columns = {row[1] for row in conn.execute("PRAGMA table_info(user_accounts)").fetchall()}
+        if 'phone' not in user_account_columns:
+            if _DB_RUNTIME.get('engine') == 'mysql' and hasattr(conn, '_conn'):
+                cursor = conn._conn.cursor()
+                try:
+                    cursor.execute("ALTER TABLE user_accounts ADD COLUMN phone VARCHAR(255) NOT NULL DEFAULT ''")
+                finally:
+                    cursor.close()
+            else:
+                conn.execute("ALTER TABLE user_accounts ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_accounts_phone ON user_accounts(phone) WHERE phone <> ''")
 
         conn.execute(
             '''
@@ -1744,6 +1902,44 @@ def _ensure_db():
                     _DEFAULT_VERIFY_BODY_TEMPLATE,
                     now,
                 ),
+            )
+
+        sms_table_exists = conn.execute(
+            "SELECT COUNT(1) AS cnt FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'sms_settings'"
+        ).fetchone()
+        if not sms_table_exists or int(sms_table_exists['cnt'] if hasattr(sms_table_exists, '__getitem__') else sms_table_exists[0]) == 0:
+            conn.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS sms_settings (
+                    id BIGINT PRIMARY KEY,
+                    api_host VARCHAR(255) NOT NULL DEFAULT 'https://smssh.253.com',
+                    account VARCHAR(255) NOT NULL DEFAULT '',
+                    password VARCHAR(255) NOT NULL DEFAULT '',
+                    signature VARCHAR(255) NOT NULL DEFAULT '',
+                    login_template_id VARCHAR(255) NOT NULL DEFAULT '',
+                    register_template_id VARCHAR(255) NOT NULL DEFAULT '',
+                    password_template_id VARCHAR(255) NOT NULL DEFAULT '',
+                    report TINYINT(1) NOT NULL DEFAULT 1,
+                    callback_url VARCHAR(500) NOT NULL DEFAULT '',
+                    sender_uid VARCHAR(255) NOT NULL DEFAULT '',
+                    timeout_seconds INT NOT NULL DEFAULT 20,
+                    updated_at VARCHAR(32) NOT NULL,
+                    created_at VARCHAR(32) NOT NULL
+                )
+                '''
+            )
+        sms_row = conn.execute('SELECT 1 FROM sms_settings WHERE id = 1').fetchone()
+        if not sms_row:
+            conn.execute(
+                '''
+                INSERT INTO sms_settings (
+                    id, api_host, account, password, signature,
+                    login_template_id, register_template_id, password_template_id,
+                    report, callback_url, sender_uid, timeout_seconds,
+                    updated_at, created_at
+                ) VALUES (1, 'https://smssh.253.com', '', '', '', '', '', '', 1, '', '', 20, ?, ?)
+                ''',
+                (now, now),
             )
 
         # seed 支付配置空行
@@ -3917,6 +4113,15 @@ def _build_system_menu() -> dict[str, Any]:
                             'title': '系统工具',
                         },
                     },
+                    {
+                        'name': 'SystemVersionPolicy',
+                        'path': '/system/version-policy',
+                        'component': '/system/version-policy/index',
+                        'meta': {
+                            'icon': 'mdi:download-box-outline',
+                            'title': '版本下载',
+                        },
+                    },
                 ],
             },
             {
@@ -4174,6 +4379,162 @@ def _send_email(settings: dict[str, Any], to_email: str, subject: str, content: 
             if username:
                 server.login(username, password)
             server.send_message(msg)
+
+
+
+def _get_sms_settings(mask_secret: bool = False) -> dict[str, Any]:
+    _ensure_db()
+    with _db_connect() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT api_host, account, password, signature,
+                   login_template_id, register_template_id, password_template_id,
+                   report, callback_url, sender_uid, timeout_seconds
+            FROM sms_settings
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    if not row:
+        return {
+            'apiHost': 'https://smssh.253.com',
+            'account': '',
+            'password': '',
+            'signature': '',
+            'loginTemplateId': '',
+            'registerTemplateId': '',
+            'passwordTemplateId': '',
+            'report': True,
+            'callbackUrl': '',
+            'senderUid': '',
+            'timeoutSeconds': 20,
+        }
+
+    password = str(row['password'] or '')
+    if mask_secret:
+        password = _mask_secret(password)
+
+    return {
+        'apiHost': str(row['api_host'] or 'https://smssh.253.com'),
+        'account': str(row['account'] or ''),
+        'password': password,
+        'signature': str(row['signature'] or ''),
+        'loginTemplateId': str(row['login_template_id'] or ''),
+        'registerTemplateId': str(row['register_template_id'] or ''),
+        'passwordTemplateId': str(row['password_template_id'] or ''),
+        'report': bool(int(row['report'] or 0)),
+        'callbackUrl': str(row['callback_url'] or ''),
+        'senderUid': str(row['sender_uid'] or ''),
+        'timeoutSeconds': int(row['timeout_seconds'] or 20),
+    }
+
+
+def _coerce_sms_settings_from_body(body: SmsSettingsBody) -> dict[str, Any]:
+    return {
+        'apiHost': (body.apiHost or 'https://smssh.253.com').strip() or 'https://smssh.253.com',
+        'account': (body.account or '').strip(),
+        'password': str(body.password or ''),
+        'signature': (body.signature or '').strip(),
+        'loginTemplateId': (body.loginTemplateId or '').strip(),
+        'registerTemplateId': (body.registerTemplateId or '').strip(),
+        'passwordTemplateId': (body.passwordTemplateId or '').strip(),
+        'report': bool(body.report),
+        'callbackUrl': (body.callbackUrl or '').strip(),
+        'senderUid': (body.senderUid or '').strip(),
+        'timeoutSeconds': max(5, min(int(body.timeoutSeconds or 20), 120)),
+    }
+
+
+def _sms_dev_mode_enabled() -> bool:
+    value = str(os.getenv('AICEMIND_SMS_DEV_MODE') or '').strip().lower()
+    return value in {'1', 'true', 'yes', 'on'}
+
+
+
+def _validate_sms_settings(settings: dict[str, Any]) -> Optional[str]:
+    if _sms_dev_mode_enabled():
+        return None
+    required = ['apiHost', 'account', 'password']
+    for key in required:
+        if not str(settings.get(key) or '').strip():
+            return f'{key} 不能为空'
+    if not str(settings.get('loginTemplateId') or '').strip():
+        return '登录短信模板ID不能为空'
+    if not str(settings.get('registerTemplateId') or '').strip():
+        return '注册短信模板ID不能为空'
+    return None
+
+
+def _sms_code_payload(settings: dict[str, Any], phone: str, code: str, template_id: str) -> tuple[dict[str, Any], str]:
+    timestamp = str(int(time.time()))
+    nonce = uuid.uuid4().hex
+    md5_password = hashlib.md5(str(settings.get('password') or '').encode('utf-8')).hexdigest()
+    signature_seed = ''.join(sorted([md5_password, timestamp, nonce]))
+    signature = hmac.new(md5_password.encode('utf-8'), signature_seed.encode('utf-8'), hashlib.sha256).hexdigest()
+    payload = {
+        'account': str(settings.get('account') or ''),
+        'nonce': nonce,
+        'timestamp': timestamp,
+        'phoneNumbers': phone,
+        'templateId': template_id,
+        'templateParamJson': json.dumps([{'param1': code}], ensure_ascii=False),
+        'signature': str(settings.get('signature') or '').strip(),
+        'report': 'true' if bool(settings.get('report')) else 'false',
+        'callbackUrl': str(settings.get('callbackUrl') or '').strip(),
+        'uid': str(settings.get('senderUid') or '').strip(),
+    }
+    return payload, signature
+
+
+def _send_sms_code(settings: dict[str, Any], phone: str, code: str, purpose: str = 'login'):
+    phone = str(phone or '').strip()
+    if not re.fullmatch(r'1\d{10}', phone):
+        raise ValueError('手机号格式错误')
+
+    if _sms_dev_mode_enabled():
+        return {
+            'devMode': True,
+            'phone': phone,
+            'code': code,
+            'purpose': purpose,
+            'message': '短信 dev 模式：未实际发送，使用数据库中的验证码进行联调',
+        }
+
+    template_key = 'loginTemplateId' if purpose == 'login' else 'registerTemplateId' if purpose == 'register' else 'passwordTemplateId'
+    template_id = str(settings.get(template_key) or '').strip()
+    if not template_id:
+        raise ValueError('短信模板未配置')
+
+    payload, signature = _sms_code_payload(settings, phone, code, template_id)
+    url = f"{str(settings.get('apiHost') or 'https://smssh.253.com').rstrip('/')}/msg/sms/v2/tpl/send"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-QA-Hmac-Signature': signature,
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=int(settings.get('timeoutSeconds') or 20))
+    resp.raise_for_status()
+    result = resp.json() if 'json' in resp.headers.get('content-type', '').lower() else {'raw': resp.text}
+
+    try:
+        print(f"📨 SMS provider response: {json.dumps(result, ensure_ascii=False)}")
+    except Exception:
+        print(f"📨 SMS provider response(raw): {result}")
+
+    if isinstance(result, dict):
+        success_flag = result.get('success')
+        if success_flag is False:
+            raise ValueError(str(result.get('message') or result.get('msg') or result.get('errorMsg') or '短信通道返回失败'))
+
+        code_value = result.get('code', result.get('status'))
+        if code_value is not None:
+            code_text = str(code_value).strip()
+            if code_text not in {'0', '200', '000000', 'OK', 'ok', 'SUCCESS', 'success'}:
+                raise ValueError(
+                    str(result.get('message') or result.get('msg') or result.get('errorMsg') or f'短信通道返回失败(code={code_text})')
+                )
+
+    return result
 
 
 def _build_register_mail(settings: dict[str, Any], email: str, code: str, expire_minutes: int):

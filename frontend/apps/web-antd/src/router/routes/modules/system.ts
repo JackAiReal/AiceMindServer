@@ -22,6 +22,15 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        name: 'SystemSmsSettings',
+        path: '/system/sms-settings',
+        component: () => import('#/views/system/sms-settings/index.vue'),
+        meta: {
+          icon: 'mdi:message-cog-outline',
+          title: '短信设置',
+        },
+      },
+      {
         name: 'SystemSensitiveSecrets',
         path: '/system/sensitive-secrets',
         component: () => import('#/views/system/sensitive-secrets/index.vue'),
@@ -37,6 +46,15 @@ const routes: RouteRecordRaw[] = [
         meta: {
           icon: 'mdi:wrench-cog-outline',
           title: '系统工具',
+        },
+      },
+      {
+        name: 'SystemVersionPolicy',
+        path: '/system/version-policy',
+        component: () => import('#/views/system/version-policy/index.vue'),
+        meta: {
+          icon: 'mdi:download-box-outline',
+          title: '版本下载',
         },
       },
     ],

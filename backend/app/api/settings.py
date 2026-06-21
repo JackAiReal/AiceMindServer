@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import html
 import json
 from datetime import datetime
 from io import BytesIO
 
 from fastapi import APIRouter, File, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from app.api.deps import *  # noqa: F401,F403
 from app.secret_sync_shared import encrypt_payload
 
@@ -29,6 +30,9 @@ class VersionPolicySaveBody(BaseModel):
     downloadUrl: str = ''
     releaseNotes: str = ''
     publishedAt: str = ''
+    updaterUrl: str = ''
+    updaterSignature: str = ''
+    updaterPubkey: str = ''
 
 
 class VersionCheckBody(BaseModel):
@@ -238,26 +242,40 @@ def _cmp_version(a: str, b: str) -> int:
     return 0
 
 
+def _row_value(row: Any, key: str, default: Any = '') -> Any:
+    try:
+        if hasattr(row, 'get'):
+            value = row.get(key, default)
+        else:
+            value = row[key]
+    except Exception:
+        value = default
+    return default if value is None else value
+
+
 def _serialize_version_policy(row: Any) -> dict[str, Any]:
     return {
-        'id': str(row['id'] or ''),
-        'appCode': str(row['app_code'] or ''),
-        'target': str(row['target'] or ''),
-        'platform': str(row['platform'] or ''),
-        'channel': str(row['channel'] or ''),
-        'latestVersion': str(row['latest_version'] or ''),
-        'minSupportedVersion': str(row['min_supported_version'] or ''),
-        'enforceExactMatch': bool(int(row['enforce_exact_match'] or 0)),
-        'forceUpgrade': bool(int(row['force_upgrade'] or 0)),
-        'autoUpgradeWithoutConfirm': bool(int(row['auto_upgrade_without_confirm'] or 0)),
-        'title': str(row['title'] or ''),
-        'details': str(row['details'] or ''),
-        'downloadUrl': str(row['download_url'] or ''),
-        'releaseNotes': str(row['release_notes'] or ''),
-        'publishedAt': str(row['published_at'] or ''),
-        'updatedBy': str(row['updated_by'] or ''),
-        'updatedAt': str(row['updated_at'] or ''),
-        'createdAt': str(row['created_at'] or ''),
+        'id': str(_row_value(row, 'id', '')),
+        'appCode': str(_row_value(row, 'app_code', '')),
+        'target': str(_row_value(row, 'target', '')),
+        'platform': str(_row_value(row, 'platform', '')),
+        'channel': str(_row_value(row, 'channel', '')),
+        'latestVersion': str(_row_value(row, 'latest_version', '')),
+        'minSupportedVersion': str(_row_value(row, 'min_supported_version', '')),
+        'enforceExactMatch': bool(int(_row_value(row, 'enforce_exact_match', 0) or 0)),
+        'forceUpgrade': bool(int(_row_value(row, 'force_upgrade', 0) or 0)),
+        'autoUpgradeWithoutConfirm': bool(int(_row_value(row, 'auto_upgrade_without_confirm', 0) or 0)),
+        'title': str(_row_value(row, 'title', '')),
+        'details': str(_row_value(row, 'details', '')),
+        'downloadUrl': str(_row_value(row, 'download_url', '')),
+        'releaseNotes': str(_row_value(row, 'release_notes', '')),
+        'publishedAt': str(_row_value(row, 'published_at', '')),
+        'updaterUrl': str(_row_value(row, 'updater_url', '')),
+        'updaterSignature': str(_row_value(row, 'updater_signature', '')),
+        'updaterPubkey': str(_row_value(row, 'updater_pubkey', '')),
+        'updatedBy': str(_row_value(row, 'updated_by', '')),
+        'updatedAt': str(_row_value(row, 'updated_at', '')),
+        'createdAt': str(_row_value(row, 'created_at', '')),
     }
 
 
@@ -360,6 +378,9 @@ def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str
                         download_url = ?,
                         release_notes = ?,
                         published_at = ?,
+                        updater_url = ?,
+                        updater_signature = ?,
+                        updater_pubkey = ?,
                         updated_by = ?,
                         updated_at = ?
                     WHERE id = ?
@@ -375,6 +396,9 @@ def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str
                         str(body.downloadUrl or '').strip(),
                         str(body.releaseNotes or '').strip(),
                         str(body.publishedAt or '').strip(),
+                        str(body.updaterUrl or '').strip(),
+                        str(body.updaterSignature or '').strip(),
+                        str(body.updaterPubkey or '').strip(),
                         actor,
                         now,
                         row_id,
@@ -388,8 +412,9 @@ def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str
                         latest_version, min_supported_version,
                         enforce_exact_match, force_upgrade, auto_upgrade_without_confirm,
                         title, details, download_url, release_notes,
-                        published_at, updated_by, updated_at, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        published_at, updater_url, updater_signature, updater_pubkey,
+                        updated_by, updated_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         row_id,
@@ -407,6 +432,9 @@ def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str
                         str(body.downloadUrl or '').strip(),
                         str(body.releaseNotes or '').strip(),
                         str(body.publishedAt or '').strip(),
+                        str(body.updaterUrl or '').strip(),
+                        str(body.updaterSignature or '').strip(),
+                        str(body.updaterPubkey or '').strip(),
                         actor,
                         now,
                         now,
@@ -433,6 +461,121 @@ def save_version_policy(body: VersionPolicySaveBody, authorization: Optional[str
             conn.commit()
 
     return _ok(True, message='版本策略已保存')
+
+
+@router.get('/public/version-policy')
+def public_version_policy(
+    appCode: str = Query('AiceMind'),
+    target: str = Query('backtest-desktop'),
+    platform: str = Query('all'),
+    channel: str = Query('stable'),
+):
+    app_code = str(appCode or 'AiceMind').strip() or 'AiceMind'
+    target_value = str(target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform_value = str(platform or 'all').strip() or 'all'
+    channel_value = str(channel or 'stable').strip() or 'stable'
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = _find_best_version_policy(conn, app_code, target_value, platform_value, channel_value)
+
+    if not row:
+        return _ok(
+            {
+                'appCode': app_code,
+                'target': target_value,
+                'platform': platform_value,
+                'channel': channel_value,
+                'latestVersion': '',
+                'minSupportedVersion': '',
+                'title': '',
+                'details': '',
+                'downloadUrl': '',
+                'releaseNotes': '',
+                'publishedAt': '',
+                'hasPolicy': False,
+            }
+        )
+
+    payload = _serialize_version_policy(row)
+    payload['hasPolicy'] = True
+    return _ok(payload)
+
+
+@router.get('/public/download-page', response_class=HTMLResponse)
+def public_download_page(
+    appCode: str = Query('AiceMind'),
+    target: str = Query('backtest-desktop'),
+    platform: str = Query('all'),
+    channel: str = Query('stable'),
+):
+    app_code = str(appCode or 'AiceMind').strip() or 'AiceMind'
+    target_value = str(target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform_value = str(platform or 'all').strip() or 'all'
+    channel_value = str(channel or 'stable').strip() or 'stable'
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = _find_best_version_policy(conn, app_code, target_value, platform_value, channel_value)
+
+    title = '客户端下载'
+    subtitle = '请从下方按钮直接下载最新版客户端'
+    version_text = ''
+    details_html = ''
+    release_notes_html = ''
+    download_url = ''
+
+    if row:
+        title = str(row['title'] or '').strip() or title
+        details = str(row['details'] or '').strip()
+        download_url = str(row['download_url'] or '').strip()
+        latest_version = _normalize_version(str(row['latest_version'] or ''))
+        published_at = str(row['published_at'] or '').strip()
+        release_notes = str(row['release_notes'] or '').strip()
+        subtitle = details or subtitle
+        if latest_version:
+            version_text = f"最新版本：v{latest_version}"
+            if published_at:
+                version_text += f" · 发布时间：{published_at}"
+        if details:
+            details_html = '<p style="margin:12px 0 0;color:#475569;line-height:1.8;white-space:pre-wrap;">' + html.escape(details) + '</p>'
+        if release_notes:
+            release_notes_html = '<div style="margin-top:20px;padding:16px;border-radius:14px;background:#f8fafc;border:1px solid #e2e8f0;">' \
+                + '<div style="font-weight:700;color:#0f172a;margin-bottom:8px;">更新说明</div>' \
+                + '<div style="color:#334155;line-height:1.8;white-space:pre-wrap;">' + html.escape(release_notes) + '</div></div>'
+
+    button_html = (
+        f'<a href="{html.escape(download_url)}" style="display:inline-flex;align-items:center;justify-content:center;min-width:220px;height:48px;padding:0 24px;border-radius:999px;background:#2563eb;color:#fff;font-weight:700;text-decoration:none;box-shadow:0 10px 24px rgba(37,99,235,.25);">立即下载</a>'
+        if download_url
+        else '<div style="display:inline-flex;align-items:center;justify-content:center;min-width:220px;height:48px;padding:0 24px;border-radius:999px;background:#cbd5e1;color:#475569;font-weight:700;">暂未配置下载地址</div>'
+    )
+
+    page = f"""<!doctype html>
+<html lang=\"zh-CN\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{html.escape(app_code)} 下载</title>
+</head>
+<body style=\"margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(180deg,#eff6ff 0%,#f8fafc 100%);color:#0f172a;\">
+  <div style=\"max-width:760px;margin:0 auto;padding:48px 20px 72px;\">
+    <div style=\"background:#fff;border:1px solid #dbeafe;border-radius:24px;box-shadow:0 24px 60px rgba(15,23,42,.08);padding:32px;\">
+      <div style=\"font-size:14px;color:#2563eb;font-weight:700;letter-spacing:.08em;text-transform:uppercase;\">{html.escape(app_code)}</div>
+      <h1 style=\"margin:12px 0 8px;font-size:32px;line-height:1.2;\">{html.escape(title)}</h1>
+      <div style=\"color:#475569;font-size:16px;line-height:1.8;\">{html.escape(subtitle)}</div>
+      {details_html}
+      <div style=\"margin-top:20px;color:#0f172a;font-weight:600;\">{html.escape(version_text)}</div>
+      <div style=\"margin-top:28px;\">{button_html}</div>
+      {release_notes_html}
+    </div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(page)
 
 
 @router.post('/public/version/check')
@@ -514,6 +657,64 @@ def public_version_check(body: VersionCheckBody):
             'reason': reason,
         }
     )
+
+
+@router.get('/public/updater/{os_target}/{arch}/{current_version}')
+def public_updater_manifest(
+    os_target: str,
+    arch: str,
+    current_version: str,
+    appCode: str = Query('AiceMind'),
+    target: str = Query('backtest-desktop'),
+    platform: str = Query('all'),
+    channel: str = Query('stable'),
+    bundleType: str = Query('app'),
+):
+    app_code = str(appCode or 'AiceMind').strip() or 'AiceMind'
+    target_value = str(target or 'backtest-desktop').strip() or 'backtest-desktop'
+    platform_value = str(platform or 'all').strip() or 'all'
+    channel_value = str(channel or 'stable').strip() or 'stable'
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = _find_best_version_policy(conn, app_code, target_value, platform_value, channel_value)
+
+    if not row:
+        return _fail('未找到更新策略', code=404)
+
+    latest = _normalize_version(str(_row_value(row, 'latest_version', '') or ''))
+    updater_url = str(_row_value(row, 'updater_url', '') or '').strip() or str(_row_value(row, 'download_url', '') or '').strip()
+    updater_signature = str(_row_value(row, 'updater_signature', '') or '').strip()
+    release_notes = str(_row_value(row, 'release_notes', '') or '').strip()
+    published_at = str(_row_value(row, 'published_at', '') or '').strip()
+    updater_pubkey = str(_row_value(row, 'updater_pubkey', '') or '').strip()
+
+    if not latest:
+        return _fail('最新版本未配置', code=400)
+    if not updater_url:
+        return _fail('updaterUrl 未配置', code=400)
+    if not updater_signature:
+        return _fail('updaterSignature 未配置', code=400)
+
+    payload = {
+        'version': latest,
+        'notes': release_notes or None,
+        'pub_date': published_at or None,
+        'url': updater_url,
+        'signature': updater_signature,
+        'platformHint': {
+            'osTarget': os_target,
+            'arch': arch,
+            'bundleType': bundleType,
+            'platform': platform_value,
+            'currentVersion': current_version,
+        },
+    }
+    if updater_pubkey:
+        payload['pubkey'] = updater_pubkey
+    return payload
 
 
 class MigrationDownBody(BaseModel):
@@ -1363,3 +1564,96 @@ def save_email_settings(
             conn.commit()
 
     return _ok(True, message='邮箱设置已保存')
+
+
+@router.get('/system/sms-settings')
+def get_sms_settings(authorization: Optional[str] = Header(default=None)):
+    user = _require_user(authorization)
+    _require_admin(user)
+    return _ok(_get_sms_settings(mask_secret=False))
+
+
+@router.post('/system/sms-settings/send-test')
+def send_test_sms(
+    body: SendTestSmsBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _require_user(authorization)
+    _require_admin(user)
+
+    phone = str(body.phone or '').strip()
+    if not re.fullmatch(r'1\d{10}', phone):
+        return _fail('测试手机号格式错误')
+
+    settings = _coerce_sms_settings_from_body(body)
+    err = _validate_sms_settings(settings)
+    if err:
+        return _fail(err)
+
+    try:
+        _send_sms_code(settings, phone, '123456', purpose='login')
+    except Exception as e:
+        return _fail(f'测试短信发送失败: {e}')
+
+    return _ok(True, message='测试短信发送成功，请检查手机')
+
+
+@router.post('/system/sms-settings/save')
+def save_sms_settings(
+    body: SmsSettingsBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _require_user(authorization)
+    _require_admin(user)
+
+    settings = _coerce_sms_settings_from_body(body)
+    err = _validate_sms_settings(settings)
+    if err:
+        return _fail(err)
+
+    with _DB_LOCK:
+        _ensure_db()
+        with _db_connect() as conn:
+            conn.execute(
+                '''
+                UPDATE sms_settings
+                SET api_host = ?,
+                    account = ?,
+                    password = ?,
+                    signature = ?,
+                    login_template_id = ?,
+                    register_template_id = ?,
+                    password_template_id = ?,
+                    report = ?,
+                    callback_url = ?,
+                    sender_uid = ?,
+                    timeout_seconds = ?,
+                    updated_at = ?
+                WHERE id = 1
+                ''',
+                (
+                    settings['apiHost'],
+                    settings['account'],
+                    settings['password'],
+                    settings['signature'],
+                    settings['loginTemplateId'],
+                    settings['registerTemplateId'],
+                    settings['passwordTemplateId'],
+                    1 if settings['report'] else 0,
+                    settings['callbackUrl'],
+                    settings['senderUid'],
+                    settings['timeoutSeconds'],
+                    _now_str(),
+                ),
+            )
+            _audit_log(
+                conn,
+                str(user.get('id') or ''),
+                'system.sms_settings.save',
+                'sms_settings',
+                '1',
+                {'apiHost': settings['apiHost'], 'account': settings['account']},
+            )
+            conn.commit()
+
+    return _ok(True, message='短信设置已保存')
